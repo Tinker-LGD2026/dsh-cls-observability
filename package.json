@@ -48,6 +48,7 @@
     "spike:cls": "node scripts/spike-cls.ts",
     "e2e": "node scripts/e2e.ts",
     "e2e:ptc": "node scripts/e2e.ts --ptc --task \"Use run_code to call your bash tool twice (echo ptc-one, echo ptc-two), then delegate to a subagent the task 'Reply with the word subagent-ok'. Answer with all outputs.\"",
+    "e2e:web": "node scripts/e2e-web.ts",
     "e2e:sdk": "DSH=${DSH_REPO:-../deepseek-harness}; TSX_TSCONFIG_PATH=$DSH/tsconfig.json node --import $DSH/node_modules/tsx/dist/esm/index.mjs scripts/e2e-sdk.ts"
   },
   "devDependencies": {

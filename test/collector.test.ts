@@ -326,6 +326,47 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
     expect(a['gen_ai.output.messages']).toEqual([{ role: 'assistant', parts: [{ type: 'reasoning', content: 'think' }, { type: 'text', content: 'Fix login' }] }])
   })
 
+  it('hashes the full context, rewrites it on compaction, and stays correct after releasing old bodies', () => {
+    const { ctx, spans } = liveSetup()
+    const run = (id: string, prompts: string[]) => {
+      const { s, append } = liveSession(id)
+      ctx.emit('session/created', s)
+      prompts.forEach((p, i) => turn(ctx, append, i + 1, p, `a${i + 1}`))
+      return { s, append }
+    }
+    run('H1', ['q1', 'q2'])
+    run('H2', ['q1', 'q2'])
+    run('H3', ['q1', 'qX'])
+    const hashes = (id: string) => chats(spans).filter((x) => x.attributes['gen_ai.session.id'] === id).map((x) => x.attributes['gen_ai.input.messages.hash'])
+    expect(hashes('H1')).toEqual(hashes('H2'))
+    expect(hashes('H1')[0]).toBe(hashes('H3')[0])
+    expect(hashes('H1')[1]).not.toBe(hashes('H3')[1])
+
+    // A long session: old bodies are released, deltas stay exact.
+    const { s, append } = liveSession('H4')
+    ctx.emit('session/created', s)
+    for (let i = 1; i <= 120; i++) turn(ctx, append, i, `q${i}`, `a${i}`)
+    const long = chats(spans).filter((x) => x.attributes['gen_ai.session.id'] === 'H4')
+    expect(long.at(-1)!.attributes['gen_ai.input.messages_delta']).toEqual([
+      { role: 'assistant', parts: [{ type: 'text', content: 'a119' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'q120' }] },
+    ])
+    expect(long.at(-1)!.attributes['agent.custom.input_message_count']).toBe(239)
+
+    // Compaction replaces the history with a summary: full report of what remains, new hash.
+    const before = long.at(-1)!.attributes['gen_ai.input.messages.hash']
+    const log = (s as unknown as { snapshotEvents: () => SessionEvent[] }).snapshotEvents()
+    const first = log.find((e) => e.type === 'user/message')!.seq
+    const lastAnswer = [...log].reverse().find((e) => e.type === 'assistant/message')!.seq
+    ctx.emit('session/event', s, { type: 'user/message', seq: log.length, time: Date.now(), surfaceOp: { op: 'replace', startSeq: first, endSeq: lastAnswer }, data: text('user', 'summary of 120 turns') } as SessionEvent)
+    log.push({} as SessionEvent)
+    turn(ctx, append, 121, 'q121', 'a121')
+    const after = chats(spans).filter((x) => x.attributes['gen_ai.session.id'] === 'H4').at(-1)!.attributes
+    expect(after['agent.custom.input_delta_reset']).toBe('context_shrank')
+    expect((after['gen_ai.input.messages'] as { parts: { content: string }[] }[]).map((m) => m.parts[0]!.content)).toEqual(['summary of 120 turns', 'q121'])
+    expect(after['gen_ai.input.messages.hash']).not.toBe(before)
+  })
+
   it('places an auxiliary call in the round it belongs to', async () => {
     const { ctx, spans } = liveSetup()
     const { s, append } = liveSession('X1')

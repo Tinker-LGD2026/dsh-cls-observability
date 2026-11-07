@@ -43,6 +43,8 @@
 
 3. 照常运行 DSH（`dsh web`、`dsh headless "…"` 等）。设置 `CLS_AGENTOBS_DEBUG=true` 可以在 stderr 看到插件日志。
 
+运行中的 `dsh web` 在 `$DSH_HOME/cordis.patch.yml` 被修改后会自动加载插件，但前提是 DSH 启动时这个文件已经存在（DSH 0.2.2 不会感知启动后才新建的文件）。如果希望以后不重启就能启用插件，请预先放一个内容为 `[]` 的空 patch 文件。环境变量的变更仍需重启。
+
 ### 由程序拉起（TypeScript SDK）
 
 ```ts

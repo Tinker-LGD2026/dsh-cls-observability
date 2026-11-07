@@ -55,6 +55,10 @@ host, e.g. `/opt/dsh-cls-observability/dsh-cls-observability.mjs`. Check it agai
 3. Run DSH as usual (`dsh web`, `dsh headless "…"`, …). Set `CLS_AGENTOBS_DEBUG=true` to see what the plugin does on
    stderr.
 
+A running `dsh web` picks up the plugin when you edit `$DSH_HOME/cordis.patch.yml` — provided that file already existed
+when DSH started (DSH 0.2.2 does not notice the file being created later). To enable the plugin without a restart
+later on, keep an empty `[]` patch file in place. Changing the environment variables still needs a restart.
+
 ### Launched from a program (TypeScript SDK)
 
 ```ts

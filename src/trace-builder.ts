@@ -90,9 +90,32 @@ export type NameResolver = (parentSessionId: string, childSessionId: string) => 
 
 interface SurfaceNode {
   seq: number
-  message: Message
-  /** Hash of the raw (untruncated) role + content, computed once. */
-  hash: string
+  /** Counts as a conversation message in chat input (not system / developer, not empty). */
+  conversation: boolean
+  /** Model-visible (dormant empty nodes are not). */
+  visible: boolean
+  /** Hash of this node's own raw (untruncated) content; '' when not visible. */
+  own: string
+  /** Rolling hash of all visible raw content up to and including this node. */
+  chain: string
+  /** Number of conversation messages before this node. */
+  conversationIndex: number
+  /** Body, kept only while it may still be reported; released afterwards. */
+  message?: Message
+  /** System prompt text of a system node (always kept: one per session). */
+  systemText?: string
+}
+
+/** Already reported messages kept for a full report after a prefix change. */
+const FULL_REPORT_TAIL = 64
+
+/** Re-chain a node after an earlier part of the surface was replaced. */
+function rechain(n: SurfaceNode, prev: SurfaceNode): SurfaceNode {
+  return {
+    ...n,
+    chain: n.visible ? contentHash([prev.chain, n.own]) : prev.chain,
+    conversationIndex: prev.conversationIndex + (prev.conversation ? 1 : 0),
+  }
 }
 
 const SURFACE_TYPES = new Set(['system/message', 'developer/message', 'user/message', 'assistant/message', 'tool/result'])
@@ -227,8 +250,13 @@ export class SessionTracer {
   private approvals = new Map<string, ApprovalState>()
   /** Mirror of the session's model-visible surface, in order. */
   private surface: SurfaceNode[] = []
-  /** Surface node seqs already reported as chat input (delta cursor). */
-  private reportedSeqs?: number[]
+  /** Delta cursor: conversation messages already reported as chat input. */
+  private reportedCount = 0
+  private reportedAny = false
+  /** An earlier part of the surface was rewritten since the last report. */
+  private prefixChanged = false
+  /** Surface index up to which reported bodies were released. */
+  private released = 0
   private historyUnknown = false
   private catalog = new Map<string, string>()
   private config?: LlmCallConfig
@@ -339,25 +367,63 @@ export class SessionTracer {
     }
   }
 
-  /** Mirror the session's ordered model-visible surface (append / replace ops). */
+  /**
+   * Mirror the session's ordered model-visible surface (append / replace ops) at
+   * constant cost per event: each node carries a rolling hash of the context up to it,
+   * and only a `replace` (compaction, system prompt swap) rewrites earlier context.
+   */
   private applySurface(event: SessionEvent): void {
     const op = event.surfaceOp as undefined | 'append' | { op?: string; startSeq?: number; endSeq?: number }
     if (op === undefined || !SURFACE_TYPES.has(event.type)) return
     const message = (event.type === 'user/message' ? event.data : event.data?.message) as Message | undefined
     if (!message || !Array.isArray(message.content)) return
-    const node: SurfaceNode = { seq: event.seq, message, hash: contentHash([message.role, message.content]) }
+    const visible = message.content.length > 0 && !(message.role === 'system' && contentText(message.content) === '')
+    const conversation = visible && message.role !== 'system' && message.role !== 'developer'
+    const make = (prev: SurfaceNode | undefined): SurfaceNode => {
+      const own = visible ? contentHash([message.role, message.content]) : ''
+      return {
+        seq: event.seq,
+        conversation,
+        visible,
+        own,
+        chain: visible ? contentHash([prev?.chain ?? '', own]) : prev?.chain ?? '',
+        conversationIndex: (prev?.conversationIndex ?? 0) + (prev?.conversation ? 1 : 0),
+        ...(visible ? { message } : {}),
+        ...(message.role === 'system' && visible ? { systemText: contentText(message.content) } : {}),
+      }
+    }
     if (op === 'append') {
-      this.surface.push(node)
+      this.surface.push(make(this.surface.at(-1)))
       return
     }
     const start = this.surface.findIndex((n) => n.seq === op.startSeq)
     const end = this.surface.findIndex((n) => n.seq === op.endSeq)
     if (op.op === 'replace' && start >= 0 && end >= start) {
-      this.surface.splice(start, end - start + 1, node)
+      const tail = this.surface.splice(start)
+      this.surface.push(make(this.surface.at(-1)))
+      // Re-chain what followed the replaced range (rare: compaction, prompt swap).
+      for (const n of tail.slice(end - start + 1)) this.surface.push(rechain(n, this.surface.at(-1)!))
+      this.prefixChanged = true
     } else {
       // Replaced nodes we never saw: the mirrored surface can no longer be trusted as complete.
       this.historyUnknown = true
-      this.surface.push(node)
+      this.prefixChanged = true
+      this.surface.push(make(this.surface.at(-1)))
+    }
+  }
+
+  /**
+   * Drop message bodies the plugin no longer needs: nodes already reported, except a
+   * recent tail kept for a full report after a prefix change. Hashes and seqs stay.
+   */
+  private releaseBodies(): void {
+    const keepFrom = Math.max(0, this.reportedCount - FULL_REPORT_TAIL)
+    for (let i = this.released; i < this.surface.length; i++) {
+      const n = this.surface[i]!
+      if (!n.conversation) continue
+      if (n.conversationIndex >= keepFrom) break
+      if (n.message && !n.systemText) delete n.message
+      this.released = i + 1
     }
   }
 
@@ -908,19 +974,11 @@ export class SessionTracer {
     }
   }
 
-  /** Model-visible surface nodes (dormant empty nodes skipped). */
-  private visibleSurface(): SurfaceNode[] {
-    return this.surface.filter((n) => n.message.content.length > 0 && !(n.message.role === 'system' && contentText(n.message.content) === ''))
-  }
-
   /** Effective system prompt: the latest non-empty system node on the surface. */
   private systemText(): string | undefined {
     for (let i = this.surface.length - 1; i >= 0; i--) {
-      const m = this.surface[i]!.message
-      if (m.role === 'system') {
-        const text = contentText(m.content)
-        if (text) return text
-      }
+      const text = this.surface[i]!.systemText
+      if (text) return text
     }
     return undefined
   }
@@ -932,36 +990,54 @@ export class SessionTracer {
    * rewritten prefix (compaction, unknown history) falls back to a full report.
    * `gen_ai.input.messages.hash` always covers the full, untruncated context. The system
    * prompt and tool updates travel in `system_instructions` / `tool.definitions`.
-   * Advances the delta cursor; call once per model request.
+   * Advances the delta cursor; call once per model request. Cost is proportional to
+   * the messages reported, not to the session length.
    */
   private chatInputAttributes(): Attributes {
-    const visible = this.visibleSurface()
-    const conversation = visible.filter((n) => n.message.role !== 'system' && n.message.role !== 'developer')
+    const last = this.surface.at(-1)
+    const total = last ? last.conversationIndex + (last.conversation ? 1 : 0) : 0
     const attrs: Attributes = {
-      'gen_ai.input.messages.hash': contentHash(visible.map((n) => n.hash)),
-      'agent.custom.input_message_count': conversation.length,
+      'gen_ai.input.messages.hash': contentHash([last?.chain ?? '']),
+      'agent.custom.input_message_count': total,
     }
-    const seqs = conversation.map((n) => n.seq)
-    const previous = this.reportedSeqs
     let reset: string | undefined
-    if (previous === undefined) reset = this.historyUnknown ? 'history_unknown' : 'first_report'
-    else if (previous.length > seqs.length) reset = 'context_shrank'
-    else if (previous.some((seq, i) => seqs[i] !== seq)) reset = 'prefix_changed'
-    this.reportedSeqs = seqs
-    if (!this.options.captureContent) return attrs
+    if (!this.reportedAny) reset = this.historyUnknown ? 'history_unknown' : 'first_report'
+    else if (this.prefixChanged) reset = total < this.reportedCount ? 'context_shrank' : 'prefix_changed'
+    const previous = this.reportedCount
+    this.reportedAny = true
+    this.reportedCount = total
+    this.prefixChanged = false
+    if (!this.options.captureContent) {
+      this.releaseBodies()
+      return attrs
+    }
 
     const t = new Truncator(this.options.maxContentChars, this.options.redactor)
+    // Newest conversation messages, oldest first, walking back only as far as needed.
+    const tail = (count: number): Message[] => {
+      const out: Message[] = []
+      for (let i = this.surface.length - 1; i >= 0 && out.length < count; i--) {
+        const n = this.surface[i]!
+        if (!n.conversation) continue
+        if (!n.message) break
+        out.push(n.message)
+      }
+      return out.reverse()
+    }
     if (reset === undefined) {
-      attrs['gen_ai.input.messages_delta'] = conversation.slice(previous!.length).map((n) => messageToGenAi(n.message, t))
+      attrs['gen_ai.input.messages_delta'] = tail(total - previous).map((m) => messageToGenAi(m, t))
     } else {
       // Bound one full report; keep the most recent messages when the history is very long.
-      const from = recentFrom(conversation.map((n) => n.message), this.options.maxContentChars * 8)
-      attrs['gen_ai.input.messages'] = conversation.slice(from).map((n) => messageToGenAi(n.message, t))
-      if (from > 0) attrs['agent.custom.input_messages_omitted'] = from
+      const available = tail(total)
+      const from = recentFrom(available, this.options.maxContentChars * 8)
+      attrs['gen_ai.input.messages'] = available.slice(from).map((m) => messageToGenAi(m, t))
+      const omitted = total - available.length + from
+      if (omitted > 0) attrs['agent.custom.input_messages_omitted'] = omitted
       if (reset !== 'first_report') attrs['agent.custom.input_delta_reset'] = reset
       if (this.historyUnknown) attrs['agent.custom.input_context_partial'] = true
     }
     Object.assign(attrs, t.marks())
+    this.releaseBodies()
     return attrs
   }
 
