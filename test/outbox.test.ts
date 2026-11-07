@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -84,7 +85,7 @@ describe('outbox', () => {
     const q = queue(outbox, slow)
     for (let i = 0; i < 3; i++) q.push(span(i))
     await Promise.all([
-      q.stop(2000, () => { void deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, 1, slow) }),
+      q.stop(2000, () => { void deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, { attempts: 1, fetchImpl: slow }) }),
     ])
     await new Promise((r) => setTimeout(r, 200))
     expect(sent).toHaveLength(1)
@@ -107,7 +108,7 @@ describe('outbox', () => {
     await new Promise((r) => setTimeout(r, 20)) // the urgent push has started a request
     q.push(span(4)) // arrives after the in-flight batch was taken
     await q.stop(2000, () => {
-      void deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, 1, slow)
+      void deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, { attempts: 1, fetchImpl: slow })
     })
     await new Promise((r) => setTimeout(r, 300))
     expect(spanIdsSent.sort()).toEqual([0, 1, 2, 3, 4].map((i) => span(i).spanId).sort())
@@ -157,15 +158,39 @@ describe('outbox', () => {
     expect(outbox.pending()).toEqual([file])
   })
 
+  it('waits for a live host holding a file, then sends it once the host has exited', async () => {
+    const dir = tempDir()
+    const outbox = new Outbox(dir)
+    const host = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)'])
+    const file = outbox.spillSync(new Uint8Array([9]))!
+    renameSync(file, `${file}.sending-${host.pid}`)
+    const bodies: Uint8Array[] = []
+    const result = await deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, { attempts: 1, fetchImpl: fakeFetch(() => 200, bodies), claimWaitMs: 5000, pollMs: 25 })
+    expect(result).toEqual({ delivered: 1, remaining: 0 })
+    expect(readdirSync(dir)).toHaveLength(0)
+  })
+
+  it('stops waiting for a live host at the deadline and leaves its file in place', async () => {
+    const dir = tempDir()
+    const outbox = new Outbox(dir)
+    const host = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 5000)'])
+    const file = outbox.spillSync(new Uint8Array([9]))!
+    renameSync(file, `${file}.sending-${host.pid}`)
+    const result = await deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, { attempts: 1, fetchImpl: fakeFetch(() => 200), claimWaitMs: 100, pollMs: 25 })
+    host.kill()
+    expect(result.delivered).toBe(0)
+    expect(readdirSync(dir)).toHaveLength(1)
+  })
+
   it('deliverOutbox sends every pending file and leaves failures in place', async () => {
     const dir = tempDir()
     const outbox = new Outbox(dir)
     outbox.spillSync(new Uint8Array([1]))
     outbox.spillSync(new Uint8Array([2]))
-    const ok = await deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, 1, fakeFetch(() => 200))
+    const ok = await deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, { attempts: 1, fetchImpl: fakeFetch(() => 200) })
     expect(ok).toEqual({ delivered: 2, remaining: 0 })
     outbox.spillSync(new Uint8Array([3]))
-    const fail = await deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, 1, fakeFetch(() => 401))
+    const fail = await deliverOutbox(dir, { endpoint: 'https://e.test', timeoutMs: 1000, gzip: true }, () => {}, { attempts: 1, fetchImpl: fakeFetch(() => 401) })
     expect(fail).toEqual({ delivered: 0, remaining: 1 })
     expect(readdirSync(dir).filter((f) => f.includes('.sending-'))).toHaveLength(0)
   })

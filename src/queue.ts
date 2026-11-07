@@ -265,7 +265,12 @@ export class ExportQueue {
   }
 
   private send(spans: SpanRecord[]): Promise<ExportResult> {
-    return exportBatch(this.boundedExporter(), { resource: this.options.resource, scope: this.options.scope, spans }, this.options.fetchImpl)
+    const startedAt = Date.now()
+    this.options.log('debug', `sending ${spans.length} spans`)
+    return exportBatch(this.boundedExporter(), { resource: this.options.resource, scope: this.options.scope, spans }, this.options.fetchImpl).then((result) => {
+      this.options.log('debug', `send finished: ${result.kind} in ${Date.now() - startedAt}ms`)
+      return result
+    })
   }
 
   /**

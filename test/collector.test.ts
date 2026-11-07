@@ -110,11 +110,13 @@ describe('Collector (live)', () => {
     ev(parent, 'tool/result', { turn: 1, step: 1, message: { role: 'tool', toolCallId: 'sub1', content: [], source: { kind: 'tool', callId: 'sub1' } } })
 
     const parentTool = spans.find((x) => kind(x) === 'tool')!
-    const childEntry = spans.find((x) => kind(x) === 'entry' && x.attributes['gen_ai.session.id'] === 'C')!
-    expect(childEntry.traceId).toBe(parentTool.traceId)
-    expect(childEntry.parentSpanId).toBe(parentTool.spanId)
-    expect(childEntry.attributes['gen_ai.agent.scope']).toBe('subagent')
-    expect(childEntry.attributes['gen_ai.subagent.parent_tool_call.id']).toBe('sub1')
+    // Nested in the parent's trace: no entry, the agent span hangs off the tool span.
+    expect(spans.some((x) => kind(x) === 'entry' && x.attributes['gen_ai.session.id'] === 'C')).toBe(false)
+    const childAgent = spans.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.session.id'] === 'C')!
+    expect(childAgent.traceId).toBe(parentTool.traceId)
+    expect(childAgent.parentSpanId).toBe(parentTool.spanId)
+    expect(childAgent.attributes['gen_ai.agent.scope']).toBe('subagent')
+    expect(childAgent.attributes['gen_ai.subagent.parent_tool_call.id']).toBe('sub1')
     const resumedEntry = spans.find((x) => kind(x) === 'entry' && x.attributes['gen_ai.session.id'] === 'R')!
     expect(resumedEntry.parentSpanId).toBeUndefined()
     expect(resumedEntry.attributes['gen_ai.subagent.parent_tool_call.id']).toBeUndefined()
@@ -241,4 +243,83 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
     expect(agent.attributes['gen_ai.operation.name']).toBe('invoke_subagent')
     expect(chats(spans).find((x) => x.attributes['gen_ai.session.id'] === 'C2')!.attributes['gen_ai.agent.name']).toBe('researcher')
   })
+
+  it('keeps an entry root for a later subagent turn in its own trace', async () => {
+    const { ctx, spans } = liveSetup()
+    const parent = liveSession('P3')
+    ctx.emit('session/created', parent.s)
+    parent.append(ctx, 'turn/start', { turn: 1 })
+    parent.append(ctx, 'step/start', { turn: 1, step: 1 })
+    parent.append(ctx, 'tool/call', { turn: 1, step: 1, callId: 'c1', name: 'subagent', arguments: '{}' })
+    const child = liveSession('C3', { parentSession: 'P3', origin: 'subagent' })
+    await ctx.waterfall('tools/execute', { callId: 'c1', rootCallId: 'c1', name: 'subagent', agent: { session: parent.s } }, async () => {
+      ctx.emit('session/created', child.s)
+      return {}
+    })
+    turn(ctx, child.append, 1, 'first', 'a1')
+    turn(ctx, child.append, 2, 'second', 'a2')
+    const mine = spans.filter((x) => x.attributes['gen_ai.session.id'] === 'C3')
+    expect(mine.filter((x) => kind(x) === 'entry').map((x) => x.attributes['gen_ai.turn.id'])).toEqual(['C3:t2'])
+    const entry = mine.find((x) => kind(x) === 'entry')!
+    expect(entry.parentSpanId).toBeUndefined()
+    expect(mine.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.turn.id'] === 'C3:t2')!.parentSpanId).toBe(entry.spanId)
+  })
+
+  it('records the prompt and reply of an auxiliary call without touching the stream', async () => {
+    const { ctx, spans } = liveSetup()
+    const { s, append } = liveSession('A1')
+    ctx.emit('session/created', s)
+    append(ctx, 'turn/start', { turn: 1 })
+    const chunks = [
+      { type: 'reasoning-delta', text: 'think' },
+      { type: 'text-delta', text: 'Fix ' },
+      { type: 'text-delta', text: 'login' },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]
+    const options = {
+      provider: 'deepseek', model: 'm', sessionId: 'A1', purpose: 'session-title', system: 'Write a title',
+      messages: [{ role: 'user', content: 'help me fix login' }],
+    }
+    const seen: unknown[] = []
+    const stream = await ctx.waterfall('llm/stream', options, () => (async function* () { yield* chunks })())
+    for await (const c of stream as AsyncIterable<unknown>) seen.push(c)
+    expect(seen).toEqual(chunks)
+    const a = spans.find((x) => x.attributes['agent.custom.llm_purpose'] === 'session-title')!.attributes
+    expect(a['gen_ai.input.messages']).toEqual([{ role: 'user', parts: [{ type: 'text', content: 'help me fix login' }] }])
+    expect(a['gen_ai.input.messages_delta']).toBeUndefined()
+    expect(a['gen_ai.system_instructions']).toBe('Write a title')
+    expect(a['gen_ai.output.messages']).toEqual([{ role: 'assistant', parts: [{ type: 'reasoning', content: 'think' }, { type: 'text', content: 'Fix login' }] }])
+  })
+
+  it('places an auxiliary call in the round it belongs to', async () => {
+    const { ctx, spans } = liveSetup()
+    const { s, append } = liveSession('X1')
+    ctx.emit('session/created', s)
+    const run = async (purpose: string, during?: () => void) => {
+      const stream = await ctx.waterfall('llm/stream', { provider: 'deepseek', model: 'm', sessionId: 'X1', purpose }, () => (async function* () {
+        yield { type: 'text-delta', text: 'x' }
+        during?.()
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })())
+      for await (const _ of stream as AsyncIterable<unknown>) { /* drain */ }
+    }
+    append(ctx, 'turn/start', { turn: 1 })
+    await run('compaction') // before step 1: prepares round 1
+    append(ctx, 'step/start', { turn: 1, step: 1 })
+    // Starts in round 1 and outlives the step and the turn.
+    await run('session-title', () => {
+      append(ctx, 'step/end', { turn: 1, step: 1 })
+      append(ctx, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+    })
+    const by = (p: string) => spans.find((x) => x.attributes['agent.custom.llm_purpose'] === p)!
+    const step = spans.find((x) => kind(x) === 'step')!
+    const agent = spans.find((x) => kind(x) === 'agent')!
+    expect(by('compaction').attributes['gen_ai.step.id']).toBe('X1:t1:s1')
+    expect(by('compaction').parentSpanId).toBe(agent.spanId)
+    expect(by('session-title').attributes['gen_ai.step.id']).toBe('X1:t1:s1')
+    expect(by('session-title').parentSpanId).toBe(step.spanId)
+    expect(by('session-title').traceId).toBe(step.traceId)
+  })
 })
+

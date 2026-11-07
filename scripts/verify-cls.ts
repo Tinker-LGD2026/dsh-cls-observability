@@ -61,6 +61,8 @@ export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: n
   const contentOk = kindIs('entry').every((s) => s.attribute['gen_ai.input.messages'] && s.attribute['gen_ai.output.messages'])
     && kindIs('tool').every((s) => s.attribute['gen_ai.tool.call.arguments'] !== undefined && s.attribute['gen_ai.tool.call.result'] !== undefined)
     && kindIs('step').every((s) => /^react round_\d+$/.test(s.name))
+    && kindIs('entry').every((s) => !s.parentSpanID)
+    && kindIs('chat').filter((s) => s.attribute['agent.custom.llm_purpose']).every((s) => s.attribute['gen_ai.input.messages'] && s.attribute['gen_ai.output.messages'])
     && chatsInOrder.every((s) => (s.attribute['gen_ai.input.messages'] === undefined) !== (s.attribute['gen_ai.input.messages_delta'] === undefined))
     && kindIs('agent').every((s) => s.attribute['gen_ai.agent.scope'] !== 'subagent' || s.attribute['gen_ai.agent.name'] !== 'subagent')
   console.log(`content/naming check: ${contentOk ? 'OK' : 'MISSING'}`)

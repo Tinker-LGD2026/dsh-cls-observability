@@ -51,6 +51,21 @@ export interface AuxiliaryCall {
   firstTokenMs?: number
   usage?: TokenUsage
   finish?: FinishReason
+  /** Request as the provider sees it; present only when content capture is on. */
+  messages?: readonly Message[]
+  system?: string
+  /** Assistant reply assembled from the stream. */
+  output?: Message
+  /** Turn/round the call belongs to, captured when its request started. */
+  anchor?: AuxAnchor
+}
+
+export interface AuxAnchor {
+  turn: number
+  /** Round the call belongs to: the open step, or the one being prepared. */
+  step: number
+  traceId: string
+  parentSpanId: string
 }
 
 export interface AbandonedAttempt {
@@ -84,7 +99,8 @@ interface TurnState {
   traceId: string
   entryId: string
   agentId: string
-  entryParentId?: string
+  /** Tool span a nested subagent turn hangs off; such a turn has no entry span. */
+  toolParentId?: string
   startMs: number
   messageCount: number
   toolCallCount: number
@@ -97,7 +113,8 @@ interface TurnState {
   chatContextHash?: string
   events: SpanEvent[]
   entryLinks: SpanLink[]
-  auxCount: number
+  /** Highest step number started in this turn (0 before the first). */
+  lastStep: number
   contentTruncated: boolean
 }
 
@@ -171,6 +188,19 @@ function outcomeName(outcome: unknown): string {
   return 'unknown'
 }
 
+/** Index of the first message to keep so the tail fits `budget` chars (the last message always stays). */
+function recentFrom(messages: readonly Message[], budget: number): number {
+  let used = 0
+  let from = messages.length
+  while (from > 0) {
+    const size = JSON.stringify(messages[from - 1]!.content).length
+    if (used + size > budget && from < messages.length) break
+    used += size
+    from--
+  }
+  return from
+}
+
 /** Normalize a provider route (e.g. `deepseek-official`) to a GenAI system name. */
 export function systemName(provider: string | undefined): string | undefined {
   if (!provider) return undefined
@@ -204,6 +234,7 @@ export class SessionTracer {
   private openTurn?: number
   private turnRefs: TurnRef[] = []
   private standaloneAux = 0
+  private auxCounts = new Map<number, number>()
 
   private readonly options: BuilderOptions
   private readonly emit: (span: SpanRecord) => void
@@ -361,11 +392,11 @@ export class SessionTracer {
   private onTurnStart(event: SessionEvent): void {
     const turn = Number(event.data.turn)
     let traceId = traceIdFor(this.sessionId, turn)
-    let entryParentId: string | undefined
+    let toolParentId: string | undefined
     const entryLinks: SpanLink[] = []
     if (this.parent && !this.parentConsumed) {
       traceId = this.parent.traceId
-      entryParentId = this.parent.spanId
+      toolParentId = this.parent.spanId
       this.parentConsumed = true
     } else if (this.parent) {
       entryLinks.push({ traceId: this.parent.traceId, spanId: this.parent.spanId, attributes: { 'agent.custom.link_type': 'parent_tool_call' } })
@@ -375,7 +406,7 @@ export class SessionTracer {
       traceId,
       entryId: spanIdFor(this.sessionId, paths.entry(turn)),
       agentId: spanIdFor(this.sessionId, paths.agent(turn)),
-      ...(entryParentId ? { entryParentId } : {}),
+      ...(toolParentId ? { toolParentId } : {}),
       startMs: event.time,
       messageCount: 0,
       toolCallCount: 0,
@@ -384,7 +415,7 @@ export class SessionTracer {
       triggerMessages: [],
       events: [],
       entryLinks,
-      auxCount: 0,
+      lastStep: 0,
       contentTruncated: false,
     }
     this.turns.set(turn, state)
@@ -432,10 +463,13 @@ export class SessionTracer {
       ...truncated,
     }
 
+    // entry is a trace root. A subagent turn nested in its parent's trace has no entry:
+    // its agent span hangs directly off the tool span that spawned it.
+    const nested = state.toolParentId !== undefined
     this.emit({
       traceId: state.traceId,
       spanId: state.agentId,
-      parentSpanId: state.entryId,
+      parentSpanId: state.toolParentId ?? state.entryId,
       name: `${subagent ? 'invoke_subagent' : 'invoke_agent'} ${this.agentName()}`,
       kind: SpanKind.Internal,
       startNs: ns(state.startMs),
@@ -450,11 +484,12 @@ export class SessionTracer {
       },
       status,
       ...(state.events.length > 0 ? { events: state.events } : {}),
+      ...(nested && state.entryLinks.length > 0 ? { links: state.entryLinks } : {}),
     })
+    if (nested) return
     this.emit({
       traceId: state.traceId,
       spanId: state.entryId,
-      ...(state.entryParentId ? { parentSpanId: state.entryParentId } : {}),
       name: 'enter_application',
       kind: SpanKind.Server,
       startNs: ns(state.startMs),
@@ -489,7 +524,9 @@ export class SessionTracer {
   private onStepStart(event: SessionEvent): void {
     const turn = Number(event.data.turn)
     const step = Number(event.data.step)
-    if (!this.turns.has(turn)) return
+    const turnState = this.turns.get(turn)
+    if (!turnState) return
+    turnState.lastStep = Math.max(turnState.lastStep, step)
     this.steps.set(this.stepKey(turn, step), {
       turn,
       step,
@@ -664,15 +701,36 @@ export class SessionTracer {
     }))
   }
 
+  /**
+   * Where an auxiliary call that starts now belongs, captured when its request starts
+   * (the call may outlive the step or even the turn). Inside a step: that round. Between
+   * rounds (e.g. compaction in `agent/pre-step`): the round it prepares, parented to the
+   * agent span because that step span does not exist yet.
+   */
+  auxiliaryAnchor(): AuxAnchor | undefined {
+    const turnState = this.openTurn !== undefined ? this.turns.get(this.openTurn) : undefined
+    if (!turnState) return undefined
+    const open = this.currentStep()
+    return {
+      turn: turnState.turn,
+      step: open?.step ?? turnState.lastStep + 1,
+      traceId: turnState.traceId,
+      parentSpanId: open?.spanId ?? turnState.agentId,
+    }
+  }
+
   /** Auxiliary model call (compaction, session title, auto review), observed via `llm/stream`. */
   onAuxiliary(call: AuxiliaryCall): void {
-    const turnState = this.openTurn !== undefined ? this.turns.get(this.openTurn) : undefined
-    if (turnState) {
+    const anchor = call.anchor
+    if (anchor) {
+      const n = (this.auxCounts.get(anchor.turn) ?? 0) + 1
+      this.auxCounts.set(anchor.turn, n)
       this.emit(this.chatSpan({
-        traceId: turnState.traceId,
-        parentSpanId: turnState.agentId,
-        spanId: spanIdFor(this.sessionId, paths.aux(turnState.turn, call.purpose, ++turnState.auxCount)),
-        turn: turnState.turn,
+        traceId: anchor.traceId,
+        parentSpanId: anchor.parentSpanId,
+        spanId: spanIdFor(this.sessionId, paths.aux(anchor.turn, call.purpose, n)),
+        turn: anchor.turn,
+        step: anchor.step,
         startMs: call.startMs,
         endMs: call.endMs,
         ...(call.firstTokenMs !== undefined ? { firstTokenMs: call.firstTokenMs } : {}),
@@ -685,6 +743,7 @@ export class SessionTracer {
         purpose: call.purpose,
         provider: call.provider,
         model: call.model,
+        contentAttrs: this.auxiliaryContent(call),
       }))
       return
     }
@@ -708,8 +767,32 @@ export class SessionTracer {
       purpose: call.purpose,
       provider: call.provider,
       model: call.model,
+      contentAttrs: this.auxiliaryContent(call),
       links: last ? [{ traceId: last.traceId, spanId: last.agentSpanId, attributes: { 'agent.custom.link_type': 'auxiliary_after_turn' } }] : [],
     }))
+  }
+
+  /**
+   * An auxiliary call is a standalone request (its prompt is not the session's context),
+   * so it always reports its own full input, never a delta.
+   */
+  private auxiliaryContent(call: AuxiliaryCall): Attributes {
+    if (!this.options.captureContent) return {}
+    const t = new Truncator(this.options.maxContentChars)
+    const messages = call.messages ?? []
+    const conversation = messages.filter((m) => m.role !== 'system')
+    const system = [call.system, ...messages.filter((m) => m.role === 'system').map((m) => contentText(m.content))].filter(Boolean).join('\n')
+    const from = recentFrom(conversation, this.options.maxContentChars * 8)
+    const attrs: Attributes = {}
+    if (conversation.length > 0) {
+      attrs['gen_ai.input.messages'] = conversation.slice(from).map((m) => messageToGenAi(m, t))
+      attrs['gen_ai.input.messages.hash'] = contentHash(conversation.map((m) => [m.role, m.content]))
+    }
+    if (from > 0) attrs['agent.custom.input_messages_omitted'] = from
+    if (system) attrs['gen_ai.system_instructions'] = t.text(system)
+    if (call.output) attrs['gen_ai.output.messages'] = [messageToGenAi(call.output, t)]
+    if (t.truncated) attrs['agent.custom.content_truncated'] = true
+    return attrs
   }
 
   private chatSpan(input: {
@@ -729,6 +812,7 @@ export class SessionTracer {
     abandoned?: boolean
     output?: Message
     inputAttrs?: Attributes
+    contentAttrs?: Attributes
     replayable: boolean
     events: SpanEvent[]
     retryOf?: string
@@ -763,6 +847,7 @@ export class SessionTracer {
         : {}),
     }
     if (!input.purpose) this.addChatContent(attrs, input.output, input.inputAttrs)
+    else if (input.contentAttrs) Object.assign(attrs, input.contentAttrs)
     return {
       traceId: input.traceId,
       spanId: input.spanId,
@@ -846,15 +931,7 @@ export class SessionTracer {
       attrs['gen_ai.input.messages_delta'] = conversation.slice(previous!.length).map((n) => messageToGenAi(n.message, t))
     } else {
       // Bound one full report; keep the most recent messages when the history is very long.
-      const budget = this.options.maxContentChars * 8
-      let used = 0
-      let from = conversation.length
-      while (from > 0) {
-        const size = JSON.stringify(conversation[from - 1]!.message.content).length
-        if (used + size > budget && from < conversation.length) break
-        used += size
-        from--
-      }
+      const from = recentFrom(conversation.map((n) => n.message), this.options.maxContentChars * 8)
       attrs['gen_ai.input.messages'] = conversation.slice(from).map((n) => messageToGenAi(n.message, t))
       if (from > 0) attrs['agent.custom.input_messages_omitted'] = from
       if (reset !== 'first_report') attrs['agent.custom.input_delta_reset'] = reset

@@ -11,7 +11,7 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
-import type { AgentLike, AssistantStreamFrame, FinishReason, GenerateOptions, SessionEvent, SessionLike, StreamChunk, TokenUsage, ToolDispatchExecution } from './dsh-types.ts'
+import type { AgentLike, AssistantStreamFrame, FinishReason, GenerateOptions, Message, SessionEvent, SessionLike, StreamChunk, TokenUsage, ToolDispatchExecution } from './dsh-types.ts'
 import type { Attributes, SpanRecord } from './otlp/types.ts'
 import { SessionTracer, type BuilderOptions, type TurnRef } from './trace-builder.ts'
 
@@ -242,19 +242,27 @@ export class Collector {
     if (!purpose || !sessionId) return next()
     const tracer = this.tracers.get(String(sessionId))
     if (!tracer) return next()
+    let anchor: ReturnType<SessionTracer['auxiliaryAnchor']>
+    this.guard('llm/stream', () => { anchor = tracer.auxiliaryAnchor() })
     const source = next()
     const self = this
+    const capture = this.options.builder.captureContent
+    const limit = this.options.builder.maxContentChars + 1
     return (async function* observe() {
       const startMs = now()
       let firstTokenMs: number | undefined
       let usage: TokenUsage | undefined
       let finish: FinishReason | undefined
+      let text = ''
+      let reasoning = ''
       try {
         for await (const chunk of source) {
           try {
             if (firstTokenMs === undefined && isTokenDelta(chunk)) firstTokenMs = now()
             if (chunk.type === 'usage') usage = chunk.usage
             else if (chunk.type === 'finish') finish = chunk.reason
+            else if (capture && chunk.type === 'text-delta' && text.length < limit) text += chunk.text
+            else if (capture && chunk.type === 'reasoning-delta' && reasoning.length < limit) reasoning += chunk.text
           } catch { /* observation only */ }
           yield chunk
         }
@@ -268,6 +276,9 @@ export class Collector {
           ...(firstTokenMs !== undefined ? { firstTokenMs } : {}),
           ...(usage ? { usage } : {}),
           ...(finish ? { finish } : {}),
+          ...(anchor ? { anchor } : {}),
+          ...(capture ? requestContent(options) : {}),
+          ...(capture && (text || reasoning) ? { output: replyMessage(text, reasoning) } : {}),
         }))
       }
     })()
@@ -276,6 +287,26 @@ export class Collector {
   get activeSessions(): number {
     return this.tracers.size
   }
+}
+
+/** Read-only view of an auxiliary request; string content (user input form) becomes a text block. */
+function requestContent(options: GenerateOptions): { messages: Message[]; system?: string } {
+  const messages: Message[] = []
+  for (const raw of options.messages ?? []) {
+    const m = raw as { role?: unknown; content?: unknown }
+    if (typeof m?.role !== 'string') continue
+    const content = Array.isArray(m.content) ? m.content : typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : []
+    messages.push({ role: m.role, content, source: { kind: 'request' } } as Message)
+  }
+  return { messages, ...(typeof options.system === 'string' && options.system ? { system: options.system } : {}) }
+}
+
+function replyMessage(text: string, reasoning: string): Message {
+  return {
+    role: 'assistant',
+    content: [...(reasoning ? [{ type: 'reasoning', text: reasoning }] : []), ...(text ? [{ type: 'text', text }] : [])],
+    source: { kind: 'model' },
+  } as Message
 }
 
 export function commonAttributes(input: {

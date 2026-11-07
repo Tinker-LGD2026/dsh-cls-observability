@@ -119,6 +119,10 @@ export interface GenerateOptions {
   model: string
   sessionId?: string
   purpose?: string
+  /** Conversation exactly as the provider sees it (loop and one-shot callers). */
+  messages?: readonly unknown[]
+  /** One-shot callers' system prompt. */
+  system?: string
   temperature?: number
   maxTokens?: number
   stop?: string[]

@@ -81,7 +81,7 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | `CLS_AGENTOBS_ENDPOINT` | – | Send to an OTLP/HTTP endpoint instead (collector, relay); https, or http on loopback / with `CLS_AGENTOBS_ALLOW_HTTP=true` |
 | `CLS_AGENTOBS_CAPTURE_CONTENT` | `truncate` | Message and tool content: `truncate` / `full` / `off` (also `true` / `false`); `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is honoured too |
 | `CLS_AGENTOBS_CONTENT_MAX_CHARS` | `32000` | Per-field limit in `truncate` mode |
-| `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | Record auxiliary model calls (compaction, title, auto review) so token totals are complete |
+| `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | Record auxiliary model calls (compaction, title, auto review) so token totals and cost are complete; `false` to skip them |
 | `CLS_AGENTOBS_SAMPLE_RATIO` | `1` | Per-session sampling |
 | `CLS_AGENTOBS_SERVICE_NAME` | `deepseek-harness` | `service.name` |
 | `CLS_AGENTOBS_ENVIRONMENT` | – | `deployment.environment.name` |
@@ -104,7 +104,7 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | Span | Name | Notes |
 |---|---|---|
 | entry | `enter_application` | One per turn; the turn's prompt and final answer; `agent.custom.trigger` tells user prompts from automatic continuations |
-| agent | `invoke_agent main` / `invoke_subagent <name>` | Subagents use the name their parent gave them |
+| agent | `invoke_agent main` / `invoke_subagent <name>` | Subagents use the name their parent gave them. A subagent turn running inside its parent's trace has no entry: its agent span hangs off the tool call that started it |
 | step | `react round_<N>` | One per model step |
 | chat | `chat <model>` | Usage (cache read/miss, reasoning), time to first token, finish reason, request parameters. Input is the full context on a session's first call, then only what each call added (`gen_ai.input.messages_delta`); `gen_ai.input.messages.hash` covers the full context |
 | tool | `execute_tool <name>` | Arguments, result, error; execution time excludes human approval waits; PTC inner calls nest under `run_code` |

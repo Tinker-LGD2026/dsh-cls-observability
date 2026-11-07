@@ -14,15 +14,46 @@ import { Outbox } from './outbox.ts'
 
 export const DELIVER_FLAG = '--agentobs-deliver'
 
+export interface DeliverOptions {
+  attempts?: number
+  fetchImpl?: typeof fetch
+  /**
+   * How long to wait for files other live processes still hold. The host claims the
+   * batch that is in flight at shutdown and may stay blocked for tens of seconds in its
+   * own teardown; once it exits, that file is ours to send. Bounded so the deliverer
+   * always ends; anything left is resent on the next plugin start.
+   */
+  claimWaitMs?: number
+  pollMs?: number
+}
+
 export async function deliverOutbox(
   dir: string,
   exporter: ExporterConfig,
   log: (message: string) => void = () => {},
-  attempts = 4,
-  fetchImpl: typeof fetch = fetch,
+  options: DeliverOptions = {},
 ): Promise<{ delivered: number; remaining: number }> {
+  const { attempts = 4, fetchImpl = fetch, claimWaitMs = 120_000, pollMs = 500 } = options
   const outbox = new Outbox(dir)
-  outbox.recoverStaleClaims()
+  const waitUntil = Date.now() + claimWaitMs
+  let delivered = 0
+  for (;;) {
+    outbox.recoverStaleClaims()
+    const round = await deliverPending(outbox, exporter, log, attempts, fetchImpl)
+    delivered += round.delivered
+    if (round.stop || outbox.foreignClaims() === 0 || Date.now() >= waitUntil) break
+    await new Promise((r) => setTimeout(r, pollMs))
+  }
+  return { delivered, remaining: outbox.pending().length }
+}
+
+async function deliverPending(
+  outbox: Outbox,
+  exporter: ExporterConfig,
+  log: (message: string) => void,
+  attempts: number,
+  fetchImpl: typeof fetch,
+): Promise<{ delivered: number; stop: boolean }> {
   let delivered = 0
   for (let attempt = 0; attempt < attempts; attempt++) {
     let failed = false
@@ -40,14 +71,15 @@ export async function deliverOutbox(
         outbox.release(claimed)
         log(`delivery failed (${result.kind}): ${result.error}`)
         failed = true
-        if (result.kind === 'auth') return { delivered, remaining: outbox.pending().length }
+        if (result.kind === 'auth') return { delivered, stop: true }
         break
       }
     }
-    if (!failed) break
+    if (!failed) return { delivered, stop: false }
     await new Promise((r) => setTimeout(r, 2_000 * 2 ** attempt))
   }
-  return { delivered, remaining: outbox.pending().length }
+  // Retries exhausted: the destination is down, leave the files for the next start.
+  return { delivered, stop: true }
 }
 
 export interface DelivererSpawn {

@@ -120,6 +120,20 @@ export class Outbox {
     return recovered
   }
 
+  /** Files currently claimed by other live processes (e.g. a host's in-flight batch). */
+  foreignClaims(): number {
+    let count = 0
+    let entries: string[] = []
+    try { entries = readdirSync(this.dir) } catch { return 0 }
+    for (const entry of entries) {
+      const i = entry.lastIndexOf(CLAIM)
+      if (i < 0) continue
+      const pid = Number(entry.slice(i + CLAIM.length))
+      if (Number.isInteger(pid) && pid !== process.pid && alive(pid)) count++
+    }
+    return count
+  }
+
   private sizeBytes(): number {
     let total = 0
     try {

@@ -65,7 +65,7 @@ const harness = new DeepSeekHarness({
 | `CLS_AGENTOBS_NETWORK` | 公网 | `internal` 使用内网域名 |
 | `CLS_AGENTOBS_ENDPOINT` | – | 改为发往其他 OTLP/HTTP 端点（Collector、转发进程） |
 | `CLS_AGENTOBS_CAPTURE_CONTENT` | `truncate` | 消息与工具内容：`truncate`（单字段截断到 `CLS_AGENTOBS_CONTENT_MAX_CHARS`，默认 32000）/ `full` / `off` |
-| `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | 记录辅助模型调用，保证 token 统计完整 |
+| `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | 记录压缩、会话标题等辅助模型调用，保证 Token 与成本统计完整；设为 `false` 不采集 |
 | `CLS_AGENTOBS_SAMPLE_RATIO` | `1` | 按会话采样 |
 | `CLS_AGENTOBS_CUSTOM_ATTRIBUTES` | – | `k=v,k2=v2`，作为 `agent.custom.k` 附在每个 Span 上 |
 | `CLS_AGENTOBS_DEBUG` | `false` | stderr 诊断日志 |
@@ -77,7 +77,7 @@ const harness = new DeepSeekHarness({
 | Span | 名称 | 说明 |
 |---|---|---|
 | entry | `enter_application` | 每个 turn 一个；包含本轮输入与最终答复；`agent.custom.trigger` 区分用户发起与自动续跑 |
-| agent | `invoke_agent main` / `invoke_subagent <名字>` | 子 Agent 使用父 Agent 为它起的名字 |
+| agent | `invoke_agent main` / `invoke_subagent <名字>` | 子 Agent 使用父 Agent 为它起的名字。在父 Trace 内运行的子 Agent 轮次没有 entry，agent 直接挂在启动它的工具调用下 |
 | step | `react round_<N>` | 每次模型 step 一个 |
 | chat | `chat <模型>` | 用量（含缓存命中、推理 token）、首 token 耗时、结束原因、请求参数。输入在会话首次调用时为全量上下文，之后只上报新增部分（`gen_ai.input.messages_delta`）；`gen_ai.input.messages.hash` 对应完整上下文 |
 | tool | `execute_tool <工具名>` | 入参、结果、错误；耗时不含人工审批等待；PTC 内层调用挂在 `run_code` 下 |
