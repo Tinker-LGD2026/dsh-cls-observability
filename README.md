@@ -11,14 +11,16 @@ agent runs to [Tencent Cloud CLS AgentObs](https://cloud.tencent.com/document/pr
   token usage, time to first token, tool arguments and results, PTC (`run_code`) nested tool calls, subagents nested
   under the tool call that spawned them, auxiliary model calls (compaction, session title, auto review), approvals,
   retries.
-- **Does not lose spans at exit.** Unsent spans are written to a local outbox synchronously when DSH shuts down and
-  delivered by a detached process; anything left is resent on the next start.
+- **Does not lose spans.** Every span is journaled to local disk before it is sent, so a host killed outright
+  (`kill -9`, OOM) loses nothing: the next start resends what was not acknowledged. At a normal exit unsent spans go to
+  a local outbox and a detached process delivers them. When CLS is unreachable for long, spans overflow to disk instead
+  of being dropped. A turn interrupted by a crash gets its root spans when DSH resumes the session.
 - **Safe for the host.** Never blocks or fails DSH: every listener is isolated, it does not take part in DSH's session
   checkpoint, and configuration comes only from the real process environment (a cloned repository's `.env` cannot
   enable it, redirect it, or change content capture).
 
-> Status: 0.1.0 preview. Not yet covered: closing turns left open by a process crash, a relay for container
-> deployments, content redaction, temporary (STS) credentials.
+> Status: 0.1.0 preview. Not yet covered: a relay for container deployments, temporary (STS) credentials, turns of a
+> crashed session that is never resumed.
 
 ## Requirements
 
@@ -96,6 +98,7 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | `CLS_AGENTOBS_CUSTOM_ATTRIBUTES` | – | `k=v,k2=v2` → `agent.custom.k` on every span (secret-like keys are dropped) |
 | `CLS_AGENTOBS_DATA_DIR` | `$DSH_HOME/agentobs/outbox` | Outbox directory |
 | `CLS_AGENTOBS_DETACHED_DELIVERY` | `true` | Deliver spans spilled at exit from a detached process |
+| `CLS_AGENTOBS_JOURNAL` | `true` | Journal spans to disk before sending (survives a crash); `false` keeps them in memory only |
 | `CLS_AGENTOBS_EXPORT_TIMEOUT_MS` | `15000` | Per request |
 | `CLS_AGENTOBS_SHUTDOWN_TIMEOUT_MS` | `3500` | In-process delivery budget at exit (DSH force-exits after 5 s) |
 | `CLS_AGENTOBS_MAX_QUEUE_SPANS` | `20000` | In-memory queue bound |

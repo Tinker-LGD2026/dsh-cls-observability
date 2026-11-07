@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import type { AgentLike, AssistantStreamFrame, FinishReason, GenerateOptions, Message, SessionEvent, SessionLike, StreamChunk, TokenUsage, ToolDispatchExecution } from './dsh-types.ts'
 import type { Attributes, SpanRecord } from './otlp/types.ts'
+import { interruptedTail, type ClosedTurns } from './crash-closure.ts'
 import { SessionTracer, type BuilderOptions, type TurnRef } from './trace-builder.ts'
 
 export interface CollectorOptions {
@@ -21,6 +22,8 @@ export interface CollectorOptions {
   sampleRatio: number
   emit: (span: SpanRecord) => void
   log: (level: 'debug' | 'warn', message: string) => void
+  /** Turns already closed after a crash (shared across processes); omitted disables closing. */
+  closedTurns?: ClosedTurns
 }
 
 interface LiveAttempt {
@@ -131,11 +134,47 @@ export class Collector {
     }
     try {
       const events = read.call(session)
-      tracer.seedHistory(beforeSeq === undefined ? events : events.filter((e) => e.seq < beforeSeq))
+      const history = beforeSeq === undefined ? events : events.filter((e) => e.seq < beforeSeq)
+      tracer.seedHistory(history)
+      this.closeCrashedTurn(session, history)
     } catch (error) {
       tracer.markHistoryUnknown()
       this.options.log('warn', `could not read history of session ${session.id}: ${String(error)}`)
     }
+  }
+
+  /**
+   * A restored log ending in DSH's crash closers: emit the spans those closers complete
+   * (entry, agent, the interrupted step and tool calls). Spans finished before the crash
+   * were already sent (or are journaled) and are not produced again.
+   */
+  private closeCrashedTurn(session: SessionLike, events: readonly SessionEvent[]): void {
+    const closed = this.options.closedTurns
+    const tail = closed ? interruptedTail(events) : undefined
+    if (!closed || !tail) return
+    const key = `${session.id}:t${tail.turn}`
+    if (closed.has(key)) return
+    const closerSeq = events[tail.closerStart]!.seq
+    let capture = false
+    const spans: SpanRecord[] = []
+    const replay = new SessionTracer(
+      { sessionId: session.id, header: session.header, inheritedEventCount: Number(session.inheritedEventCount ?? 0) },
+      { ...this.options.builder, source: 'live' },
+      (span) => { if (capture) spans.push(span) },
+      this.resolveTurn,
+      this.resolveName,
+    )
+    replay.seedHistory(events.slice(0, tail.regionStart))
+    for (const event of events.slice(tail.regionStart)) {
+      capture = event.seq >= closerSeq
+      replay.onEvent(event)
+    }
+    closed.add(key)
+    for (const span of spans) {
+      span.attributes['agent.custom.closed_after_crash'] = true
+      this.options.emit(span)
+    }
+    if (spans.length > 0) this.options.log('debug', `closed crashed turn ${key} (${spans.length} spans)`)
   }
 
   private onCreated(session: SessionLike): void {

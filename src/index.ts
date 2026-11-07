@@ -17,6 +17,8 @@ import { Collector, commonAttributes, type ContextLike } from './collector.ts'
 import { processEnvReader, resolveConfig, type EnvReader, type EnvSource } from './config.ts'
 import { DELIVER_FLAG, deliverOutbox, spawnDeliverer } from './deliver.ts'
 import type { ExporterConfig } from './exporter.ts'
+import { ClosedTurnsFile } from './crash-closure.ts'
+import { Journal } from './journal.ts'
 import { Outbox } from './outbox.ts'
 import { ExportQueue } from './queue.ts'
 import type { Attributes } from './otlp/types.ts'
@@ -109,18 +111,21 @@ export function apply(ctx: PluginContext): void {
   const outboxUsable = outbox.ensure()
   if (!outboxUsable) log('warn', `outbox ${outbox.dir} is not writable; spans undelivered at exit will be lost`)
 
+  const scope = { name: 'dsh-cls-observability', version: VERSION }
   const queue = new ExportQueue({
     exporter,
     resource,
-    scope: { name: 'dsh-cls-observability', version: VERSION },
+    scope,
     maxBatchSpans: 512,
     flushIntervalMs: 2_000,
     maxQueueSpans: config.maxQueueSpans,
     ...(outboxUsable ? { outbox } : {}),
+    ...(outboxUsable && config.journal ? { journal: new Journal(outbox.dir, { resource, scope }, log) } : {}),
     log,
   })
 
   const collector = new Collector({
+    ...(outboxUsable ? { closedTurns: new ClosedTurnsFile(outbox.dir) } : {}),
     builder: {
       captureContent: config.captureContent,
       maxContentChars: config.maxContentChars,

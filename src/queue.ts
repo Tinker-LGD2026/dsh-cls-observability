@@ -8,6 +8,7 @@
  *   so a host whose teardown blocks the event loop cannot lose the data.
  */
 import { encodeGzipBody, exportBatch, exportGzipBody, type ExporterConfig, type ExportResult } from './exporter.ts'
+import { recoverJournals, type Journal } from './journal.ts'
 import type { Outbox } from './outbox.ts'
 import type { Attributes, SpanRecord } from './otlp/types.ts'
 
@@ -21,6 +22,8 @@ export interface QueueOptions {
   eagerDelayMs?: number
   maxQueueSpans: number
   outbox?: Outbox
+  /** Write-ahead journal: spans are on disk before they are sent. */
+  journal?: Journal
   log: (level: 'debug' | 'warn', message: string) => void
   fetchImpl?: typeof fetch
 }
@@ -77,14 +80,10 @@ export class ExportQueue {
   /** Enqueue a span. `urgent` (e.g. a turn just ended) wakes the sender immediately. */
   push(span: SpanRecord, urgent = false): void {
     if (this.stopped) return
+    this.options.journal?.append(span)
     this.buffer.push(span)
     this.stats.enqueued++
-    if (this.buffer.length > this.options.maxQueueSpans) {
-      const drop = this.buffer.length - this.options.maxQueueSpans
-      this.buffer.splice(0, drop)
-      this.stats.dropped += drop
-      this.options.log('warn', `queue full: dropped ${drop} oldest spans (total dropped ${this.stats.dropped})`)
-    }
+    if (this.buffer.length > this.options.maxQueueSpans) this.overflow()
     this.stats.pending = this.buffer.length
     if (urgent || this.buffer.length >= this.options.maxBatchSpans) queueMicrotask(() => this.wake?.())
     else if (!this.eagerTimer) {
@@ -93,13 +92,36 @@ export class ExportQueue {
     }
   }
 
+  /**
+   * The destination has been unreachable long enough to fill memory: move the oldest
+   * spans (never the batch in flight) to an outbox file instead of dropping them. Drop
+   * only when the outbox cannot take them (disk full, over its size limit).
+   */
+  private overflow(): void {
+    const inflight = this.sending && this.buffer[0] === this.sending[0] ? this.sending.length : 0
+    const count = Math.max(this.buffer.length - this.options.maxQueueSpans, Math.min(this.options.maxBatchSpans, this.buffer.length - inflight))
+    const chunk = this.buffer.slice(inflight, inflight + count)
+    const outbox = this.options.outbox
+    if (outbox && this.spill(outbox, chunk)) {
+      this.options.log('debug', `queue full: moved ${chunk.length} spans to the outbox`)
+    } else {
+      this.stats.dropped += chunk.length
+      this.options.log('warn', `queue full: dropped ${chunk.length} oldest spans (total dropped ${this.stats.dropped})`)
+    }
+    this.buffer.splice(inflight, chunk.length)
+    this.options.journal?.ack(chunk)
+  }
+
   start(): void {
     if (this.running) return
     this.running = true
     if (this.options.outbox) {
-      const recovered = this.options.outbox.recoverStaleClaims()
-      if (recovered > 0) this.options.log('debug', `released ${recovered} stale outbox claims`)
+      const released = this.options.outbox.recoverStaleClaims()
+      if (released > 0) this.options.log('debug', `released ${released} stale outbox claims`)
+      const recovered = recoverJournals(this.options.outbox, (m) => this.options.log('debug', m))
+      if (recovered > 0) this.options.log('debug', `recovered ${recovered} spans journaled by an earlier process`)
     }
+    this.options.journal?.start()
     void this.loop()
   }
 
@@ -154,6 +176,7 @@ export class ExportQueue {
         this.settleInflightSpill(ok)
       }
       if (!ok) return false
+      this.options.journal?.ack(batch)
       buffer.splice(0, batch.length)
       if (buffer === this.buffer) this.stats.pending = buffer.length
     }
@@ -247,6 +270,7 @@ export class ExportQueue {
       if (result.kind === 'ok') this.stats.exported++
       else if (result.kind === 'rejected') this.dropRejected(span, result.error)
       else {
+        this.options.journal?.ack(batch.slice(0, settled))
         buffer.splice(0, settled)
         if (buffer === this.buffer) this.stats.pending = buffer.length
         this.onFailure(result)
@@ -340,6 +364,10 @@ export class ExportQueue {
         }
       }
     }
+    // Everything unsent now lives in outbox files: the journal is redundant. Done before
+    // any await — the host may force-exit at any point after this.
+    const journal = this.options.journal
+    if (journal && this.buffer.length === 0) journal.discard()
     let delivered = await this.flush(timeoutMs)
     if (!delivered && this.inflight) {
       // The host may have blocked the event loop past our deadline while a request was
@@ -354,11 +382,15 @@ export class ExportQueue {
     } else if (!delivered) {
       if (outbox && outbox.pending().length > 0) {
         this.options.log('debug', `shutdown: ${outbox.pending().length} outbox files kept for later delivery`)
+      } else if (this.buffer.length > 0 && journal?.active) {
+        this.options.log('warn', `shutdown: ${this.buffer.length} spans not delivered within ${timeoutMs}ms; kept in the journal for the next start`)
       } else if (this.buffer.length > 0) {
         this.stats.dropped += this.buffer.length
         this.options.log('warn', `shutdown: ${this.buffer.length} spans not delivered within ${timeoutMs}ms and could not be spilled`)
       }
     }
+    // Spill failed: unsent spans stay journaled (acks above kept it exact).
+    journal?.release()
     this.buffer = []
     this.stats.pending = 0
     return { delivered, ...(spillFile ? { spillFile } : {}) }

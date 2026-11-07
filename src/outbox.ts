@@ -120,12 +120,14 @@ export class Outbox {
     return recovered
   }
 
-  /** Files currently claimed by other live processes (e.g. a host's in-flight batch). */
+  /** Outbox files currently claimed by other live processes (e.g. a host's in-flight batch). */
   foreignClaims(): number {
     let count = 0
     let entries: string[] = []
     try { entries = readdirSync(this.dir) } catch { return 0 }
     for (const entry of entries) {
+      // Only delivery files: a live host's own journal is not ours to wait for.
+      if (!entry.includes(`${SUFFIX}${CLAIM}`)) continue
       const i = entry.lastIndexOf(CLAIM)
       if (i < 0) continue
       const pid = Number(entry.slice(i + CLAIM.length))

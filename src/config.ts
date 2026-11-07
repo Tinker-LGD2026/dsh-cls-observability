@@ -23,6 +23,8 @@ export interface AgentObsConfig {
   dataDir?: string
   /** Spawn a detached process to deliver spans spilled at exit. */
   detachedDelivery: boolean
+  /** Write-ahead journal: spans are on disk before they are sent (survives a crash). */
+  journal: boolean
   /** Proxy variables from trusted layers, forwarded to the detached deliverer. */
   proxy: Record<string, string>
   region?: string
@@ -231,6 +233,7 @@ export function resolveConfig(env: EnvReader, profileName?: string): ConfigResul
       ...(credentialsFile ? { credentialsFile } : {}),
       ...(dataDir ? { dataDir } : {}),
       detachedDelivery: get('CLS_AGENTOBS_DETACHED_DELIVERY') === undefined ? true : truthy(get('CLS_AGENTOBS_DETACHED_DELIVERY')),
+      journal: get('CLS_AGENTOBS_JOURNAL') === undefined ? true : truthy(get('CLS_AGENTOBS_JOURNAL')),
       proxy,
       ...(region ? { region } : {}),
       captureContent: (contentMode ?? 'truncate') !== 'off',

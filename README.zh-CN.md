@@ -6,10 +6,10 @@
 
 - **单文件、零依赖**：`dist/dsh-cls-observability.mjs` 是一个 Cordis 插件，在 DSH 任意 patch 层按文件路径加载即可。不需要 `dsh plugin add`，不需要每个 profile 单独安装，Agent 主机上也不需要包管理器。
 - **AgentObs 语义**：每个 turn 五层 Span（`entry → agent → step → chat / tool`），字段按 CLS 定义；包含 token 用量、首 token 耗时、工具入参与结果、PTC（`run_code`）内层工具调用、挂在父工具调用下的子 Agent、辅助模型调用（压缩、会话标题、自动审查）、审批与重试。
-- **退出不丢数据**：DSH 退出时，未发送的 Span 同步写入本地 outbox，由独立进程补发；仍未送达的在下次启动时补发。
+- **不丢数据**：每个 Span 发送前先写入本地磁盘日志，进程被直接杀掉（`kill -9`、OOM）也不丢，下次启动补发未确认的部分；正常退出时未发送的 Span 写入本地 outbox，由独立进程补发；CLS 长时间不可达时多出的 Span 转存磁盘而不是丢弃；崩溃时进行中的 turn 会在 DSH 续跑该会话时补上根 Span。
 - **不影响宿主**：插件异常不会传给 DSH；不参与 DSH 的会话检查点；配置只读真实进程环境，克隆来的仓库里的 `.env` 无法开启采集、改写上报地址或修改内容采集设置。
 
-> 状态：0.1.0 预览版。尚未覆盖：进程崩溃后未结束 turn 的补全、容器场景的转发进程、内容脱敏、临时密钥（STS）。
+> 状态：0.1.0 预览版。尚未覆盖：容器场景的转发进程、临时密钥（STS）、崩溃后从未续跑的会话中未结束的 turn。
 
 ## 运行要求
 
@@ -67,6 +67,7 @@ const harness = new DeepSeekHarness({
 | `CLS_AGENTOBS_NETWORK` | 公网 | `internal` 使用内网域名 |
 | `CLS_AGENTOBS_ENDPOINT` | – | 改为发往其他 OTLP/HTTP 端点（Collector、转发进程） |
 | `CLS_AGENTOBS_CAPTURE_CONTENT` | `truncate` | 消息与工具内容：`truncate`（单字段截断到 `CLS_AGENTOBS_CONTENT_MAX_CHARS`，默认 32000）/ `full` / `off` |
+| `CLS_AGENTOBS_JOURNAL` | `true` | 发送前先写磁盘日志（进程崩溃不丢）；`false` 仅保存在内存 |
 | `CLS_AGENTOBS_REDACT` | `on` | 上报前对内容做密钥脱敏（见下文）；`off` 关闭 |
 | `CLS_AGENTOBS_REDACT_PATTERNS` | – | 自定义脱敏规则：正则表达式的 JSON 数组，如 `["EMP-\\d{6}"]` |
 | `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | 记录压缩、会话标题等辅助模型调用，保证 Token 与成本统计完整；设为 `false` 不采集 |

@@ -183,6 +183,72 @@ describe('Collector: content redaction', () => {
   })
 })
 
+describe('Collector: closing a turn left open by a crash', () => {
+  const closedTurns = () => { const keys = new Set<string>(); return { has: (k: string) => keys.has(k), add: (k: string) => { keys.add(k) } } }
+  function setupWith(closed: ReturnType<typeof closedTurns>) {
+    const ctx = new FakeContext()
+    const spans: SpanRecord[] = []
+    new Collector({
+      builder: { captureContent: false, maxContentChars: 1000, commonAttributes: {} },
+      includeAuxiliary: true, sampleRatio: 1, emit: (s) => spans.push(s), log: () => {}, closedTurns: closed,
+    }).attach(ctx)
+    return { ctx, spans }
+  }
+  const msg = (role: string, content: unknown[], extra: object = {}) => ({ role, content, source: { kind: role === 'user' ? 'user' : role === 'tool' ? 'tool' : 'model' }, ...extra })
+  /** Turn 1 completed; turn 2 crashed with `bash` call c2 running; DSH appended closers on resume. */
+  function crashedLog(): SessionEvent[] {
+    const e: [string, unknown, number?][] = [
+      ['turn/start', { turn: 1 }], ['step/start', { turn: 1, step: 1 }],
+      ['user/message', msg('user', [{ type: 'text', text: 'q1' }])],
+      ['assistant/message', { turn: 1, step: 1, message: msg('assistant', [{ type: 'text', text: 'a1' }]), stream: [] }],
+      ['step/end', { turn: 1, step: 1 }], ['turn/end', { turn: 1, reason: { kind: 'completed' } }],
+      ['turn/start', { turn: 2 }], ['step/start', { turn: 2, step: 1 }],
+      ['user/message', msg('user', [{ type: 'text', text: 'q2' }])],
+      ['assistant/message', { turn: 2, step: 1, message: msg('assistant', [{ type: 'tool-call', id: 'c2', name: 'bash', arguments: '{}' }]), stream: [] }],
+      ['tool/call', { turn: 2, step: 1, callId: 'c2', name: 'bash', arguments: '{}' }, 1000],
+      // DSH closers: same time as the last real event.
+      ['tool/result', { turn: 2, step: 1, message: msg('tool', [{ type: 'text', text: 'interrupted' }], { id: 'interrupted-tool-result-c2-11', toolCallId: 'c2', isError: true, source: { kind: 'tool', callId: 'c2' } }), error: { name: 'ToolOutcomeUnknownError', code: 'TOOL_OUTCOME_UNKNOWN' } }, 1000],
+      ['step/end', { turn: 2, step: 1 }, 1000],
+      ['turn/end', { turn: 2, reason: { kind: 'interrupted' } }, 1000],
+    ]
+    return e.map(([type, data, time], seq) => ({ type, seq, time: time ?? 100 + seq, data, ...(type.endsWith('message') || type === 'tool/result' ? { surfaceOp: 'append' } : {}) }) as SessionEvent)
+  }
+  const restored = (id: string, log: SessionEvent[]) => ({ ...session(id, {}, log.length), snapshotEvents: () => log }) as SessionLike
+
+  it('emits the root, the interrupted step and the unanswered tool call — nothing finished before the crash', () => {
+    const { ctx, spans } = setupWith(closedTurns())
+    ctx.emit('session/created', restored('K1', crashedLog()))
+    expect(spans.map((x) => `${kind(x)}:${String(x.attributes['gen_ai.turn.id'])}`).sort()).toEqual(['agent:K1:t2', 'entry:K1:t2', 'step:K1:t2', 'tool:K1:t2'])
+    expect(spans.every((x) => x.attributes['agent.custom.closed_after_crash'] === true)).toBe(true)
+    const entry = spans.find((x) => kind(x) === 'entry')!
+    expect(entry.status?.code).toBe(2)
+    expect(spans.find((x) => kind(x) === 'tool')!.status?.code).toBe(2)
+    expect(new Set(spans.map((x) => x.traceId)).size).toBe(1)
+  })
+
+  it('does not emit a step that had completed before the crash', () => {
+    const log = crashedLog().slice(0, 9)
+    log.push(
+      { type: 'assistant/message', seq: 9, time: 200, data: { turn: 2, step: 1, message: msg('assistant', [{ type: 'text', text: 'a2' }]), stream: [] }, surfaceOp: 'append' } as SessionEvent,
+      { type: 'step/end', seq: 10, time: 210, data: { turn: 2, step: 1 } } as SessionEvent,
+      { type: 'turn/end', seq: 11, time: 210, data: { turn: 2, reason: { kind: 'interrupted' } } } as SessionEvent,
+    )
+    const { ctx, spans } = setupWith(closedTurns())
+    ctx.emit('session/created', restored('K2', log))
+    expect(spans.map(kind).sort()).toEqual(['agent', 'entry'])
+  })
+
+  it('closes a crashed turn once, however often the session is reopened', () => {
+    const closed = closedTurns()
+    const first = setupWith(closed)
+    first.ctx.emit('session/created', restored('K3', crashedLog()))
+    const again = setupWith(closed)
+    again.ctx.emit('session/created', restored('K3', crashedLog()))
+    expect(first.spans.length).toBe(4)
+    expect(again.spans).toEqual([])
+  })
+})
+
 describe('Collector: chat input deltas, restored history, subagent names', () => {
   function liveSetup() {
     const ctx = new FakeContext()

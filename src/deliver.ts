@@ -10,6 +10,7 @@
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { exportGzipBody, type Credentials, type ExporterConfig } from './exporter.ts'
+import { recoverJournals } from './journal.ts'
 import { Outbox } from './outbox.ts'
 
 export const DELIVER_FLAG = '--agentobs-deliver'
@@ -39,6 +40,7 @@ export async function deliverOutbox(
   let delivered = 0
   for (;;) {
     outbox.recoverStaleClaims()
+    recoverJournals(outbox, log)
     const round = await deliverPending(outbox, exporter, log, attempts, fetchImpl)
     delivered += round.delivered
     if (round.stop || outbox.foreignClaims() === 0 || Date.now() >= waitUntil) break
