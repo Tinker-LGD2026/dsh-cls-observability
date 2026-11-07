@@ -54,7 +54,16 @@ host, e.g. `/opt/dsh-cls-observability/dsh-cls-observability.mjs`. Check it agai
    export TENCENTCLOUD_SECRET_KEY=<secret key>
    ```
 
-3. Run DSH as usual (`dsh web`, `dsh headless "…"`, …). Set `CLS_AGENTOBS_DEBUG=true` to see what the plugin does on
+3. Check the setup without sending any trace data:
+
+   ```bash
+   node /opt/dsh-cls-observability/dsh-cls-observability.mjs --selftest
+   ```
+
+   It reports the configuration, whether the outbox is writable, and whether CLS accepts the credentials and topic
+   (an empty request: nothing is written to the topic). Exit code 0 when everything passes.
+
+4. Run DSH as usual (`dsh web`, `dsh headless "…"`, …). Set `CLS_AGENTOBS_DEBUG=true` to see what the plugin does on
    stderr.
 
 A running `dsh web` picks up the plugin when you edit `$DSH_HOME/cordis.patch.yml` — provided that file already existed
@@ -88,6 +97,7 @@ Commands of the plugin file (they read the same `CLS_AGENTOBS_*` variables):
 
 | Command | Does |
 |---|---|
+| `node dsh-cls-observability.mjs --selftest [dir]` | Check configuration, outbox and CLS credentials / topic without writing data |
 | `node dsh-cls-observability.mjs --flush [dir]` | Deliver the outbox and journals of dead processes once; exit 0 when empty |
 | `node dsh-cls-observability.mjs --relay [dir]` | Keep delivering every `CLS_AGENTOBS_RELAY_INTERVAL_MS` (5000); final flush on SIGTERM |
 

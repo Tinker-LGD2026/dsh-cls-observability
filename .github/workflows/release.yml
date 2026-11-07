@@ -1,0 +1,53 @@
+name: release
+
+# Push a tag vX.Y.Z whose version matches package.json.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write # npm provenance
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: DeepSeek Harness recordings
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: dsh-v0.2.2-rc.1
+          path: deepseek-harness
+          sparse-checkout: snapshots
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Tag matches package.json
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          DSH_REPO: ${{ github.workspace }}/deepseek-harness
+      - run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: GitHub release with the plugin file and its checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/dsh-cls-observability.mjs dist/dsh-cls-observability.mjs.sha256 \
+            --title "$GITHUB_REF_NAME" --generate-notes

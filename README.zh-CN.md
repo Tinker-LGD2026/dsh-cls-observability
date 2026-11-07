@@ -41,7 +41,15 @@
    export TENCENTCLOUD_SECRET_KEY=<SecretKey>
    ```
 
-3. 照常运行 DSH（`dsh web`、`dsh headless "…"` 等）。设置 `CLS_AGENTOBS_DEBUG=true` 可以在 stderr 看到插件日志。
+3. 不发送任何 Trace 数据即可检查配置：
+
+   ```bash
+   node /opt/dsh-cls-observability/dsh-cls-observability.mjs --selftest
+   ```
+
+   会报告配置情况、outbox 是否可写，以及 CLS 是否接受当前的凭证和主题（发送的是空请求，不会向主题写入数据）。全部通过时返回 0。
+
+4. 照常运行 DSH（`dsh web`、`dsh headless "…"` 等）。设置 `CLS_AGENTOBS_DEBUG=true` 可以在 stderr 看到插件日志。
 
 运行中的 `dsh web` 在 `$DSH_HOME/cordis.patch.yml` 被修改后会自动加载插件，但前提是 DSH 启动时这个文件已经存在（DSH 0.2.2 不会感知启动后才新建的文件）。如果希望以后不重启就能启用插件，请预先放一个内容为 `[]` 的空 patch 文件。环境变量的变更仍需重启。
 
@@ -67,6 +75,7 @@ const harness = new DeepSeekHarness({
 
 | 命令 | 作用 |
 |---|---|
+| `node dsh-cls-observability.mjs --selftest [目录]` | 检查配置、outbox 以及 CLS 凭证与主题，不写入数据 |
 | `node dsh-cls-observability.mjs --flush [目录]` | 补发一次 outbox 及已退出进程的写前日志；全部送达时返回 0 |
 | `node dsh-cls-observability.mjs --relay [目录]` | 每隔 `CLS_AGENTOBS_RELAY_INTERVAL_MS`（默认 5000）持续补发；收到 SIGTERM 时最后补发一次 |
 

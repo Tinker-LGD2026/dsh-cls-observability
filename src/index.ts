@@ -16,7 +16,7 @@ import { pathToFileURL } from 'node:url'
 import { Collector, commonAttributes, type ContextLike } from './collector.ts'
 import { processEnvReader, resolveConfig, type EnvReader, type EnvSource } from './config.ts'
 import { DELIVER_FLAG, deliverOutbox, spawnDeliverer } from './deliver.ts'
-import type { ExporterConfig } from './exporter.ts'
+import { encodeGzipBody, exportGzipBody, type ExporterConfig } from './exporter.ts'
 import { ClosedTurnsFile } from './crash-closure.ts'
 import { Journal } from './journal.ts'
 import { Outbox } from './outbox.ts'
@@ -275,8 +275,45 @@ async function runRelay(dirArg: string | undefined): Promise<number> {
   return remaining === 0 ? 0 : 1
 }
 
+/**
+ * `--selftest [dir]`: check what a DSH host would do with the current environment,
+ * without writing any trace data: configuration, outbox, and an empty OTLP request that
+ * CLS answers 200 (ok), 401/403 (credentials) or 404 (topic). Exit code 0 when all pass.
+ */
+async function runSelftest(dirArg: string | undefined): Promise<number> {
+  const out = (ok: boolean | undefined, label: string, detail: string) =>
+    process.stdout.write(`${ok === undefined ? '-   ' : ok ? 'ok  ' : 'FAIL'} ${label}: ${detail}\n`)
+  const result = resolveConfig(processEnvReader())
+  for (const w of result.warnings) out(undefined, 'warning', w)
+  if (!result.enabled) {
+    out(false, 'configuration', result.reason)
+    return 1
+  }
+  const config = result.config
+  out(true, 'configuration', `endpoint ${config.endpoint}${config.topicId ? `, topic ${config.topicId}` : ''}, credentials ${config.credentials ? (config.credentialsFile ? `from ${config.credentialsFile}` : 'from environment') : 'none'}`)
+  out(true, 'content', config.captureContent ? `captured (${config.maxContentChars === 1_000_000 ? 'full' : `truncated at ${config.maxContentChars}`}), redaction ${config.redactor ? 'on' : 'OFF'}` : 'not captured')
+  let failed = false
+  const { dir, exporter } = commandSetup(dirArg)
+  const outbox = new Outbox(dir)
+  const writable = outbox.ensure()
+  out(writable, 'outbox', writable ? `${dir} writable, ${outbox.pending().length} files waiting` : `${dir} not writable: spans undelivered at exit or during an outage would be lost`)
+  failed ||= !writable
+  const started = Date.now()
+  const probe = await exportGzipBody(exporter, encodeGzipBody({ resource: {}, scope: { name: 'dsh-cls-observability-selftest', version: VERSION }, spans: [] }))
+  const ms = Date.now() - started
+  const verdict: Record<string, string> = {
+    ok: `reachable, credentials and topic accepted (${ms} ms)`,
+    auth: `credentials rejected: ${'error' in probe ? probe.error.trim() : ''}`,
+    rejected: `request rejected (wrong topic or endpoint?): ${'error' in probe ? probe.error.trim() : ''}`,
+    retryable: `not reachable: ${'error' in probe ? probe.error.trim() : ''}`,
+  }
+  out(probe.kind === 'ok', 'destination', verdict[probe.kind] ?? probe.kind)
+  failed ||= probe.kind !== 'ok'
+  return failed ? 1 : 0
+}
+
 const isMain = process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url
-for (const [flag, run] of [['--flush', runFlush], ['--relay', runRelay]] as const) {
+for (const [flag, run] of [['--flush', runFlush], ['--relay', runRelay], ['--selftest', runSelftest]] as const) {
   const at = process.argv.indexOf(flag)
   if (isMain && at > 0) {
     const arg = process.argv[at + 1]
