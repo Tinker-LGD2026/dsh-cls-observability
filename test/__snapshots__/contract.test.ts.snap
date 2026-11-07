@@ -1,0 +1,64 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`span tree snapshots > acp/cancel-tool-calls/session.v4.jsonl 1`] = `
+"entry enter_application  [trigger=user end=aborted]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["tool_calls"] out=10]
+      tool execute_tool bash  [ERROR(ABORTED)]
+      tool execute_tool bash  [ERROR(ABORTED_BEFORE_DISPATCH)]"
+`;
+
+exports[`span tree snapshots > acp/escalation-approved/session.v4.jsonl 1`] = `
+"entry enter_application  [trigger=user end=completed]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["tool_calls"] out=174]
+      tool execute_tool bash  [events=escalation]
+    step react round_2
+      chat chat deepseek-v4-flash  [finish=["stop"] out=42]"
+`;
+
+exports[`span tree snapshots > sdk/bash-tool/session.v4.jsonl 1`] = `
+"entry enter_application  [trigger=user end=completed]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["tool_calls"] out=89]
+      tool execute_tool bash
+    step react round_2
+      chat chat deepseek-v4-flash  [finish=["stop"] out=24]"
+`;
+
+exports[`span tree snapshots > sdk/manual-compact/session.v4.jsonl 1`] = `
+"entry enter_application  [trigger=user end=completed]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["stop"] out=32]
+entry enter_application  [trigger=user end=completed]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["stop"] out=32]"
+`;
+
+exports[`span tree snapshots > sdk/max-tokens-continue/session.v4.jsonl 1`] = `
+"entry enter_application  [trigger=user end=max-tokens]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["length"] out=12]
+entry enter_application  [trigger=user end=completed]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["stop"] out=28]"
+`;
+
+exports[`span tree snapshots > sdk/ptc-turn/session.v4.jsonl 1`] = `
+"entry enter_application  [trigger=user end=completed]
+  agent invoke_agent main
+    step react round_1
+      chat chat deepseek-v4-flash  [finish=["tool_calls"] out=214]
+      tool execute_tool run_code
+        tool execute_tool bash  [ptc]
+        tool execute_tool bash  [ptc]
+    step react round_2
+      chat chat deepseek-v4-flash  [finish=["stop"] out=50]"
+`;

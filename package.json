@@ -1,0 +1,60 @@
+{
+  "name": "dsh-cls-observability",
+  "version": "0.1.0",
+  "description": "Tencent Cloud CLS AgentObs trace collector for DeepSeek Harness: a single zero-dependency Cordis plugin file exporting OTLP traces",
+  "type": "module",
+  "license": "MIT",
+  "author": "Tinker-LGD2026",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tinker-LGD2026/dsh-cls-observability.git"
+  },
+  "homepage": "https://github.com/Tinker-LGD2026/dsh-cls-observability#readme",
+  "bugs": {
+    "url": "https://github.com/Tinker-LGD2026/dsh-cls-observability/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "tencent-cloud",
+    "cls",
+    "agentobs",
+    "opentelemetry",
+    "otlp",
+    "tracing",
+    "observability",
+    "llm",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "exports": {
+    ".": "./dist/dsh-cls-observability.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "spike:cls": "node scripts/spike-cls.ts",
+    "e2e": "node scripts/e2e.ts",
+    "e2e:ptc": "node scripts/e2e.ts --ptc --task \"Use run_code to call your bash tool twice (echo ptc-one, echo ptc-two), then delegate to a subagent the task 'Reply with the word subagent-ok'. Answer with all outputs.\"",
+    "e2e:sdk": "DSH=${DSH_REPO:-../deepseek-harness}; TSX_TSCONFIG_PATH=$DSH/tsconfig.json node --import $DSH/node_modules/tsx/dist/esm/index.mjs scripts/e2e-sdk.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.25.12",
+    "protobufjs": "^7.6.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}
