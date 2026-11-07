@@ -65,6 +65,8 @@ const harness = new DeepSeekHarness({
 | `CLS_AGENTOBS_NETWORK` | 公网 | `internal` 使用内网域名 |
 | `CLS_AGENTOBS_ENDPOINT` | – | 改为发往其他 OTLP/HTTP 端点（Collector、转发进程） |
 | `CLS_AGENTOBS_CAPTURE_CONTENT` | `truncate` | 消息与工具内容：`truncate`（单字段截断到 `CLS_AGENTOBS_CONTENT_MAX_CHARS`，默认 32000）/ `full` / `off` |
+| `CLS_AGENTOBS_REDACT` | `on` | 上报前对内容做密钥脱敏（见下文）；`off` 关闭 |
+| `CLS_AGENTOBS_REDACT_PATTERNS` | – | 自定义脱敏规则：正则表达式的 JSON 数组，如 `["EMP-\\d{6}"]` |
 | `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | 记录压缩、会话标题等辅助模型调用，保证 Token 与成本统计完整；设为 `false` 不采集 |
 | `CLS_AGENTOBS_SAMPLE_RATIO` | `1` | 按会话采样 |
 | `CLS_AGENTOBS_CUSTOM_ATTRIBUTES` | – | `k=v,k2=v2`，作为 `agent.custom.k` 附在每个 Span 上 |
@@ -87,6 +89,13 @@ Trace 与 Span ID 由会话日志计算得出，同一个 Span 无论发送几�
 ### 内容与隐私
 
 默认采集消息与工具内容（截断模式），因为 CLS AgentObs 控制台需要展示 chat 输入输出和工具入参结果。这些内容可能包含用户与工具交换的任何数据。设置 `CLS_AGENTOBS_CAPTURE_CONTENT=off` 后只上报结构、耗时与用量。
+
+内容离开进程前会先脱敏，命中处替换为 `[REDACTED:<规则名>]`，Span 上标注 `agent.custom.content_redacted`，命中的规则记录在 `agent.custom.redacted_types`：
+
+- 私钥、腾讯云 SecretId（`AKID…`）、AWS Access Key、GitHub / GitLab / Slack Token、Google API Key、`sk-…` 形式的 API Key、JWT、`Bearer` / `Basic` 凭证、URL 中的密码；
+- 键名表示凭证的 `KEY=value`、`"key": "value"` 赋值（如 `password`、`secret_key`、`api_key`、`token`），以及工具入参中这类键下的值。
+
+脱敏基于规则匹配，能覆盖常见格式，但不能保证识别所有密钥。可用 `CLS_AGENTOBS_REDACT_PATTERNS` 补充自己的格式，或关闭内容采集。
 
 ## 开发
 

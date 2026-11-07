@@ -39,6 +39,15 @@ describe('resolveConfig', () => {
     expect(internal.enabled && internal.config.endpoint).toBe('https://ap-shanghai.cls.tencentyun.com/v1/traces')
   })
 
+  it('redacts content by default; only the process environment can switch it off', () => {
+    const on = resolveConfig(layered({ process: base }))
+    expect(on.enabled && on.config.redactor).toBeDefined()
+    const off = resolveConfig(layered({ process: { ...base, CLS_AGENTOBS_REDACT: 'off' } }))
+    expect(off.enabled && off.config.redactor).toBeUndefined()
+    const fromProject = resolveConfig(layered({ process: base, 'project-env': { CLS_AGENTOBS_REDACT: 'off' } }))
+    expect(fromProject.enabled && fromProject.config.redactor).toBeDefined()
+  })
+
   it('supports off / truncate / full content capture modes', () => {
     const mode = (v: string) => resolveConfig(layered({ process: { ...base, CLS_AGENTOBS_CAPTURE_CONTENT: v } }))
     const off = mode('off')

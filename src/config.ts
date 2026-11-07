@@ -4,6 +4,7 @@
  * (optionally also `$DSH_HOME/.env`), never from a project `.env`, which a
  * cloned repository controls.
  */
+import { buildRedactor, type Redactor } from './redact.ts'
 import { readFileSync, statSync } from 'node:fs'
 import type { Credentials } from './exporter.ts'
 
@@ -27,6 +28,8 @@ export interface AgentObsConfig {
   region?: string
   captureContent: boolean
   maxContentChars: number
+  /** Secret redaction of captured content; undefined when switched off. */
+  redactor?: Redactor
   includeAuxiliary: boolean
   serviceName: string
   deploymentEnvironment?: string
@@ -50,7 +53,8 @@ export type ConfigResult =
 
 const WATCHED = [
   'CLS_AGENTOBS_ENABLED', 'CLS_AGENTOBS_ENDPOINT', 'CLS_AGENTOBS_TOPIC_ID', 'CLS_AGENTOBS_REGION', 'CLS_AGENTOBS_NETWORK',
-  'CLS_AGENTOBS_CAPTURE_CONTENT', 'CLS_AGENTOBS_CREDENTIALS_FILE', 'TENCENTCLOUD_SECRET_ID', 'TENCENTCLOUD_SECRET_KEY',
+  'CLS_AGENTOBS_CAPTURE_CONTENT', 'CLS_AGENTOBS_REDACT', 'CLS_AGENTOBS_REDACT_PATTERNS', 'CLS_AGENTOBS_CREDENTIALS_FILE',
+  'TENCENTCLOUD_SECRET_ID', 'TENCENTCLOUD_SECRET_KEY',
 ]
 
 /** Environment reader over plain `process.env` (no layer information: everything counts as `process`). */
@@ -206,6 +210,7 @@ export function resolveConfig(env: EnvReader, profileName?: string): ConfigResul
   const entryPlatform = get('CLS_AGENTOBS_ENTRY_PLATFORM') ?? entry.platform
   const rawMode = get('CLS_AGENTOBS_CAPTURE_CONTENT') ?? get('OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT')
   const contentMode = parseContentMode(rawMode)
+  const redactor = buildRedactor(get('CLS_AGENTOBS_REDACT'), get('CLS_AGENTOBS_REDACT_PATTERNS'), (m) => warnings.push(m))
   if (rawMode !== undefined && contentMode === undefined) warnings.push(`unknown content capture mode "${rawMode}"; using truncate`)
   const dataDir = get('CLS_AGENTOBS_DATA_DIR')
   const proxy: Record<string, string> = {}
@@ -230,6 +235,7 @@ export function resolveConfig(env: EnvReader, profileName?: string): ConfigResul
       ...(region ? { region } : {}),
       captureContent: (contentMode ?? 'truncate') !== 'off',
       maxContentChars: contentMode === 'full' ? 1_000_000 : num('CLS_AGENTOBS_CONTENT_MAX_CHARS', 32_000, 256, 1_000_000),
+      ...(redactor ? { redactor } : {}),
       includeAuxiliary: get('CLS_AGENTOBS_INCLUDE_AUXILIARY') === undefined ? true : truthy(get('CLS_AGENTOBS_INCLUDE_AUXILIARY')),
       serviceName: get('CLS_AGENTOBS_SERVICE_NAME') ?? 'deepseek-harness',
       ...(deploymentEnvironment ? { deploymentEnvironment } : {}),

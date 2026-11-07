@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { Collector } from '../src/collector.ts'
+import { BUILTIN_RULES, Redactor } from '../src/redact.ts'
 import type { SessionEvent, SessionLike } from '../src/dsh-types.ts'
 import type { SpanRecord } from '../src/otlp/types.ts'
 
@@ -146,6 +147,39 @@ describe('Collector (live)', () => {
     expect(() => ctx.emit('session/created', { id: 'x' })).not.toThrow()
     expect(() => ctx.emit('agent/assistant-stream', {})).not.toThrow()
     expect(warnings.length).toBeGreaterThan(0)
+  })
+})
+
+describe('Collector: content redaction', () => {
+  it('masks secrets in tool arguments, tool results and chat input before export', () => {
+    const ctx = new FakeContext()
+    const spans: SpanRecord[] = []
+    new Collector({
+      builder: { captureContent: true, maxContentChars: 1000, commonAttributes: {}, redactor: new Redactor(BUILTIN_RULES) },
+      includeAuxiliary: true,
+      sampleRatio: 1,
+      emit: (s) => spans.push(s),
+      log: () => {},
+    }).attach(ctx)
+    const id = 'AKID' + 'x1Y2z3'.repeat(6)
+    const s = session('RD')
+    let seq = 0
+    const ev = (type: string, data: any, surfaceOp?: 'append') =>
+      ctx.emit('session/event', s, { type, seq: seq++, time: Date.now(), data, ...(surfaceOp ? { surfaceOp } : {}) } as SessionEvent)
+    ctx.emit('session/created', s)
+    ev('turn/start', { turn: 1 })
+    ev('step/start', { turn: 1, step: 1 })
+    ev('user/message', { role: 'user', content: [{ type: 'text', text: `use secret_key=${'q'.repeat(20)}` }], source: { kind: 'user' } }, 'append')
+    ev('assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }], source: { kind: 'model' } }, stream: [] }, 'append')
+    ev('tool/call', { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: JSON.stringify({ command: 'env', password: 'pw' }) })
+    ev('tool/result', { turn: 1, step: 1, message: { role: 'tool', toolCallId: 'c1', content: [{ type: 'text', text: `TENCENTCLOUD_SECRET_ID=${id}` }], source: { kind: 'tool', callId: 'c1' } } }, 'append')
+    const tool = spans.find((x) => kind(x) === 'tool')!.attributes
+    expect(tool['gen_ai.tool.call.arguments']).toEqual({ command: 'env', password: '[REDACTED:key]' })
+    expect(String(tool['gen_ai.tool.call.result'])).not.toContain(id)
+    expect(tool['agent.custom.redacted_types']).toEqual(['key', 'tencentcloud_secret_id'])
+    const chat = spans.find((x) => kind(x) === 'chat')!.attributes
+    expect(JSON.stringify(chat['gen_ai.input.messages'])).toContain('secret_key=[REDACTED:assignment]')
+    expect(chat['agent.custom.content_redacted']).toBe(true)
   })
 })
 

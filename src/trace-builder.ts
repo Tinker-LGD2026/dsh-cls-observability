@@ -7,6 +7,7 @@
 import type { AssistantStreamRecord, FinishReason, LlmCallConfig, Message, SessionEvent, SessionHeader, TokenUsage } from './dsh-types.ts'
 import { contentHash, paths, spanIdFor, traceIdFor } from './ids.ts'
 import { SpanKind, StatusCode, double, type Attributes, type SpanEvent, type SpanLink, type SpanRecord } from './otlp/types.ts'
+import type { Redactor } from './redact.ts'
 import { Truncator, contentText, finishReasonName, messageToGenAi, reactFinishReason, readStream, usageAttributes } from './semconv.ts'
 
 export interface BuilderOptions {
@@ -14,6 +15,8 @@ export interface BuilderOptions {
   maxContentChars: number
   /** Static attributes added to every span (agent.type, entry.*, user.*, agent.custom.*). */
   commonAttributes: Attributes
+  /** Secret redaction for captured content; undefined when disabled. */
+  redactor?: Redactor
   source: 'live' | 'replay'
 }
 
@@ -441,7 +444,7 @@ export class SessionTracer {
       ? { code: StatusCode.Error, message: reason.kind === 'error' ? String(reason.error?.code ?? 'error') : 'interrupted' }
       : { code: StatusCode.Ok }
     const trigger = this.triggerOf(state)
-    const t = new Truncator(this.options.maxContentChars)
+    const t = new Truncator(this.options.maxContentChars, this.options.redactor)
     const content: Attributes = {}
     if (this.options.captureContent) {
       // Turn-level I/O (CLS AgentObs entry/agent fields): the prompt that started the turn, and the final answer,
@@ -454,7 +457,7 @@ export class SessionTracer {
       }
     }
     const subagent = this.header.origin === 'subagent'
-    const truncated = t.truncated || state.contentTruncated ? { 'agent.custom.content_truncated': true } : {}
+    const truncated = { ...t.marks(), ...(state.contentTruncated ? { 'agent.custom.content_truncated': true } : {}) }
     const turnAttrs: Attributes = {
       ...this.common(turn),
       'agent.custom.turn_end_reason': reason.kind,
@@ -792,7 +795,7 @@ export class SessionTracer {
    */
   private auxiliaryContent(call: AuxiliaryCall): Attributes {
     if (!this.options.captureContent) return {}
-    const t = new Truncator(this.options.maxContentChars)
+    const t = new Truncator(this.options.maxContentChars, this.options.redactor)
     const messages = call.messages ?? []
     const conversation = messages.filter((m) => m.role !== 'system')
     const system = [call.system, ...messages.filter((m) => m.role === 'system').map((m) => contentText(m.content))].filter(Boolean).join('\n')
@@ -805,7 +808,7 @@ export class SessionTracer {
     if (from > 0) attrs['agent.custom.input_messages_omitted'] = from
     if (system) attrs['gen_ai.system_instructions'] = t.text(system)
     if (call.output) attrs['gen_ai.output.messages'] = [messageToGenAi(call.output, t)]
-    if (t.truncated) attrs['agent.custom.content_truncated'] = true
+    Object.assign(attrs, t.marks())
     return attrs
   }
 
@@ -947,7 +950,7 @@ export class SessionTracer {
     this.reportedSeqs = seqs
     if (!this.options.captureContent) return attrs
 
-    const t = new Truncator(this.options.maxContentChars)
+    const t = new Truncator(this.options.maxContentChars, this.options.redactor)
     if (reset === undefined) {
       attrs['gen_ai.input.messages_delta'] = conversation.slice(previous!.length).map((n) => messageToGenAi(n.message, t))
     } else {
@@ -958,14 +961,14 @@ export class SessionTracer {
       if (reset !== 'first_report') attrs['agent.custom.input_delta_reset'] = reset
       if (this.historyUnknown) attrs['agent.custom.input_context_partial'] = true
     }
-    if (t.truncated) attrs['agent.custom.content_truncated'] = true
+    Object.assign(attrs, t.marks())
     return attrs
   }
 
   private addChatContent(attrs: Attributes, output: Message | undefined, inputAttrs: Attributes | undefined): void {
     if (inputAttrs) Object.assign(attrs, inputAttrs)
     if (!this.options.captureContent) return
-    const t = new Truncator(this.options.maxContentChars)
+    const t = new Truncator(this.options.maxContentChars, this.options.redactor)
     if (output) attrs['gen_ai.output.messages'] = [messageToGenAi(output, t)]
     // The system prompt and tool list are large and rarely change: attach them to the first
     // chat of each turn and again only when they change, not to every chat span.
@@ -982,7 +985,7 @@ export class SessionTracer {
       }
       if (turnState) turnState.chatContextHash = contextHash
     }
-    if (t.truncated) attrs['agent.custom.content_truncated'] = true
+    Object.assign(attrs, t.marks())
   }
 
   // ---------------------------------------------------------------- tools
@@ -1101,12 +1104,12 @@ export class SessionTracer {
     }
     if (result.isError) attrs['gen_ai.tool.error.message'] = String(result.error?.name ?? errorType)
     if (this.options.captureContent) {
-      const t = new Truncator(this.options.maxContentChars)
+      const t = new Truncator(this.options.maxContentChars, this.options.redactor)
       attrs['gen_ai.tool.call.arguments'] = this.parseArguments(tool.argumentsRaw, t)
       const text = (result.content ?? []).map((b) => (b.type === 'text' ? String((b as { text: string }).text) : `[${b.type}]`)).join('')
       attrs['gen_ai.tool.call.result'] = t.text(text)
       if (result.isError) attrs['gen_ai.tool.error.message'] = t.text(text)
-      if (t.truncated) attrs['agent.custom.content_truncated'] = true
+      Object.assign(attrs, t.marks())
     }
     this.emit({
       traceId: tool.traceId,
@@ -1127,9 +1130,10 @@ export class SessionTracer {
     if (typeof raw === 'string') {
       try { value = JSON.parse(raw) } catch { return t.text(raw) }
     }
-    const json = JSON.stringify(value ?? null)
+    const clean = t.value(value ?? null)
+    const json = JSON.stringify(clean)
     if (json.length > this.options.maxContentChars) return t.text(json)
-    return value !== null && typeof value === 'object' ? (value as Attributes[string]) : t.text(json)
+    return clean !== null && typeof clean === 'object' ? (clean as Attributes[string]) : t.text(json)
   }
 
   // ---------------------------------------------------------------- approvals

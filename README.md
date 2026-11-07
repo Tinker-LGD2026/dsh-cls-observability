@@ -81,6 +81,8 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | `CLS_AGENTOBS_ENDPOINT` | – | Send to an OTLP/HTTP endpoint instead (collector, relay); https, or http on loopback / with `CLS_AGENTOBS_ALLOW_HTTP=true` |
 | `CLS_AGENTOBS_CAPTURE_CONTENT` | `truncate` | Message and tool content: `truncate` / `full` / `off` (also `true` / `false`); `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is honoured too |
 | `CLS_AGENTOBS_CONTENT_MAX_CHARS` | `32000` | Per-field limit in `truncate` mode |
+| `CLS_AGENTOBS_REDACT` | `on` | Mask secrets in captured content (see below); `off` to disable |
+| `CLS_AGENTOBS_REDACT_PATTERNS` | – | Extra patterns: JSON array of regular expressions, e.g. `["EMP-\\d{6}"]` |
 | `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | Record auxiliary model calls (compaction, title, auto review) so token totals and cost are complete; `false` to skip them |
 | `CLS_AGENTOBS_SAMPLE_RATIO` | `1` | Per-session sampling |
 | `CLS_AGENTOBS_SERVICE_NAME` | `deepseek-harness` | `service.name` |
@@ -118,6 +120,17 @@ response arrived.
 Message and tool content is captured by default (truncated), because the CLS AgentObs console shows chat input/output
 and tool arguments/results. It can contain anything users and tools exchange. Set `CLS_AGENTOBS_CAPTURE_CONTENT=off`
 to send structure, timing and usage only.
+
+Before content leaves the process, secrets are masked as `[REDACTED:<rule>]` (the span is marked
+`agent.custom.content_redacted` with the rule names in `agent.custom.redacted_types`):
+
+- private keys, Tencent Cloud SecretId (`AKID…`), AWS access keys, GitHub / GitLab / Slack tokens, Google API keys,
+  `sk-…` API keys, JWTs, `Bearer` / `Basic` credentials, passwords in URLs;
+- the value of `KEY=value` / `"key": "value"` assignments whose key names a credential (`password`, `secret_key`,
+  `api_key`, `token`, …), and values under such keys in tool arguments.
+
+Redaction is pattern based: it catches common formats, not every secret. Add your own formats with
+`CLS_AGENTOBS_REDACT_PATTERNS`, or turn content capture off.
 
 ## Develop
 

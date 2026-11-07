@@ -125,6 +125,7 @@ export function apply(ctx: PluginContext): void {
       captureContent: config.captureContent,
       maxContentChars: config.maxContentChars,
       commonAttributes: commonAttributes(config),
+      ...(config.redactor ? { redactor: config.redactor } : {}),
     },
     includeAuxiliary: config.includeAuxiliary,
     sampleRatio: config.sampleRatio,

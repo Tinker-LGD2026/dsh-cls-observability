@@ -1,3 +1,4 @@
+import type { Redactor } from './redact.ts'
 /** AgentObs semantic helpers: stream decoding, finish-reason mapping, content projection. */
 import type { AssistantStreamRecord, ContentBlock, FinishReason, Message, StreamChunk, TokenUsage } from './dsh-types.ts'
 import type { AttrValue, Attributes } from './otlp/types.ts'
@@ -99,16 +100,33 @@ export function usageAttributes(usage: TokenUsage | undefined): Attributes {
   }
 }
 
+/** Content filter for one span: redacts secrets, then truncates each field. */
 export class Truncator {
   private readonly maxChars: number
+  private readonly redactor: Redactor | undefined
   truncated = false
-  constructor(maxChars: number) {
+  /** Names of the redaction rules that matched. */
+  readonly redacted = new Set<string>()
+  constructor(maxChars: number, redactor?: Redactor) {
     this.maxChars = maxChars
+    this.redactor = redactor
   }
   text(value: string): string {
-    if (value.length <= this.maxChars) return value
+    const clean = this.redactor ? this.redactor.text(value, this.redacted) : value
+    if (clean.length <= this.maxChars) return clean
     this.truncated = true
-    return `${value.slice(0, this.maxChars)}…[truncated ${value.length - this.maxChars} chars]`
+    return `${clean.slice(0, this.maxChars)}…[truncated ${clean.length - this.maxChars} chars]`
+  }
+  /** Redact a structured value (e.g. parsed tool arguments) without truncating it. */
+  value(value: unknown): unknown {
+    return this.redactor ? this.redactor.value(value, this.redacted) : value
+  }
+  /** Span attributes describing what this filter changed. */
+  marks(): Record<string, boolean | string[]> {
+    return {
+      ...(this.truncated ? { 'agent.custom.content_truncated': true } : {}),
+      ...(this.redacted.size > 0 ? { 'agent.custom.content_redacted': true, 'agent.custom.redacted_types': [...this.redacted].sort() } : {}),
+    }
   }
 }
 
