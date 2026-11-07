@@ -10,7 +10,7 @@
  * The same file doubles as the detached outbox deliverer:
  *   node dsh-cls-observability.mjs --agentobs-deliver <outbox-dir>
  */
-import { hostname, platform, release, tmpdir } from 'node:os'
+import { homedir, hostname, platform, release, tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Collector, commonAttributes, type ContextLike } from './collector.ts'
@@ -207,4 +207,82 @@ if (deliverAt > 0 && process.argv[1] && pathToFileURL(process.argv[1]).href === 
   const dir = process.argv[deliverAt + 1]
   if (!dir) process.exit(2)
   runDeliverer(dir).then(() => process.exit(0), () => process.exit(1))
+}
+
+// ---------------------------------------------------------------- operator commands
+
+/**
+ * Exporter and outbox directory from the standard CLS_AGENTOBS_* environment, for
+ * commands run by an operator, an entrypoint script or a sidecar.
+ */
+function commandSetup(dirArg: string | undefined): { dir: string; exporter: ExporterConfig; log: (m: string) => void } {
+  const result = resolveConfig(processEnvReader())
+  if (!result.enabled) {
+    process.stderr.write(`[cls-agentobs] ${result.reason}\n`)
+    process.exit(2)
+  }
+  const config = result.config
+  // Same default as DSH: $DSH_HOME (blank means unset), else ~/.dsh.
+  const home = process.env.DSH_HOME?.trim() ? process.env.DSH_HOME : path.join(homedir(), '.dsh')
+  const dir = dirArg ?? config.dataDir ?? path.join(home, 'agentobs', 'outbox')
+  const log = (m: string) => { if (config.debug) process.stderr.write(`[cls-agentobs] ${m}\n`) }
+  return {
+    dir,
+    log,
+    exporter: {
+      endpoint: config.endpoint,
+      ...(config.topicId ? { topicId: config.topicId } : {}),
+      ...(config.credentials ? { credentials: config.credentials } : {}),
+      timeoutMs: config.timeoutMs,
+      gzip: true,
+    },
+  }
+}
+
+/**
+ * `--flush [dir]`: deliver everything left in the outbox (including journals of dead
+ * processes), waiting for a host still finishing its last batch. Exit code 0 when the
+ * outbox is empty afterwards, 1 otherwise. Meant for container entrypoints after DSH exits.
+ */
+async function runFlush(dirArg: string | undefined): Promise<number> {
+  const { dir, exporter, log } = commandSetup(dirArg)
+  const attempts = Math.max(1, Number(process.env.CLS_AGENTOBS_FLUSH_ATTEMPTS ?? 4) || 4)
+  const { delivered, remaining } = await deliverOutbox(dir, exporter, log, { claimWaitMs: 30_000, attempts })
+  process.stderr.write(`[cls-agentobs] flush: delivered ${delivered} files, ${remaining} left in ${dir}\n`)
+  return remaining === 0 ? 0 : 1
+}
+
+/**
+ * `--relay [dir]`: keep delivering the outbox every few seconds (a sidecar sharing the
+ * volume with DSH). On SIGTERM / SIGINT it runs a final flush and exits.
+ */
+async function runRelay(dirArg: string | undefined): Promise<number> {
+  const { dir, exporter, log } = commandSetup(dirArg)
+  const interval = Number(process.env.CLS_AGENTOBS_RELAY_INTERVAL_MS ?? 5_000)
+  let stopping = false
+  let wake: (() => void) | undefined
+  const stop = () => { stopping = true; wake?.() }
+  process.on('SIGTERM', stop)
+  process.on('SIGINT', stop)
+  process.stderr.write(`[cls-agentobs] relay: delivering ${dir} every ${interval} ms\n`)
+  while (!stopping) {
+    await deliverOutbox(dir, exporter, log, { claimWaitMs: 0 })
+    // Not unref'd: this timer is what keeps the relay process alive between rounds.
+    await new Promise<void>((resolve) => { wake = resolve; setTimeout(resolve, interval) })
+  }
+  const { remaining } = await deliverOutbox(dir, exporter, log, { claimWaitMs: 20_000 })
+  process.stderr.write(`[cls-agentobs] relay stopped, ${remaining} files left\n`)
+  return remaining === 0 ? 0 : 1
+}
+
+const isMain = process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url
+for (const [flag, run] of [['--flush', runFlush], ['--relay', runRelay]] as const) {
+  const at = process.argv.indexOf(flag)
+  if (isMain && at > 0) {
+    const arg = process.argv[at + 1]
+    run(arg && !arg.startsWith('--') ? arg : undefined).then((code) => process.exit(code), (error) => {
+      process.stderr.write(`[cls-agentobs] ${flag} failed: ${String(error)}\n`)
+      process.exit(1)
+    })
+  }
 }

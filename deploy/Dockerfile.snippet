@@ -1,0 +1,27 @@
+# Add the plugin to an image that already contains DeepSeek Harness (`dsh` on PATH).
+# Build-time only: no credentials in the image; they come from the runtime environment.
+#
+#   docker build --build-arg AGENTOBS_VERSION=0.1.0 -f Dockerfile.snippet .
+
+ARG AGENTOBS_VERSION=0.1.0
+ARG AGENTOBS_SHA256=
+
+# Plugin file, verified against the published checksum when one is given.
+RUN mkdir -p /opt/dsh-cls-observability \
+ && cd /opt/dsh-cls-observability \
+ && npm pack "dsh-cls-observability@${AGENTOBS_VERSION}" --silent \
+ && tar -xzf "dsh-cls-observability-${AGENTOBS_VERSION}.tgz" --strip-components=2 package/dist/dsh-cls-observability.mjs \
+ && rm -f ./*.tgz \
+ && if [ -n "$AGENTOBS_SHA256" ]; then echo "$AGENTOBS_SHA256  dsh-cls-observability.mjs" | sha256sum -c -; fi
+
+COPY entrypoint.sh /opt/dsh-cls-observability/entrypoint.sh
+
+# Load the plugin for every profile. Kept in an image-level patch file and referenced by
+# DSH_HOME's patch at start (see k8s/deployment.yaml); a plain `[]` home patch also lets a
+# running `dsh web` pick later edits up without a restart.
+RUN printf -- '- insert:\n    - id: cls-agentobs\n      name: /opt/dsh-cls-observability/dsh-cls-observability.mjs\n' \
+      > /opt/dsh-cls-observability/agentobs.patch.yml \
+ && chmod 0755 /opt/dsh-cls-observability/entrypoint.sh
+
+ENTRYPOINT ["/opt/dsh-cls-observability/entrypoint.sh"]
+CMD ["dsh", "--profile", "headless", "--patch", "/opt/dsh-cls-observability/agentobs.patch.yml"]

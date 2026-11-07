@@ -1,0 +1,80 @@
+# DeepSeek Harness on Kubernetes (e.g. TKE) with dsh-cls-observability.
+#
+# - Credentials come from a Secret; the CLS intranet endpoint is used (same region).
+# - DSH_HOME, and with it the plugin outbox and journal, lives on a volume. Use a PVC so
+#   spans left by a crashed or evicted pod are delivered by the next pod; emptyDir works
+#   but loses them with the pod.
+# - The entrypoint flushes the outbox after DSH exits; terminationGracePeriodSeconds must
+#   cover DSH shutdown (5 s) plus that flush.
+# - Optional: a native sidecar (`--relay`) keeps delivering the shared outbox, for long-
+#   running hosts or when the image cannot use the entrypoint.
+#
+#   kubectl create secret generic cls-credential \
+#     --from-literal=secretId=<SecretId> --from-literal=secretKey=<SecretKey>
+#   (use a sub-account limited to cls:UploadLog on the trace topic)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dsh-home
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dsh-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: dsh-agent }
+  template:
+    metadata:
+      labels: { app: dsh-agent }
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        # Every profile loads the plugin; an existing home patch also enables hot reload in `dsh web`.
+        - name: dsh-home-patch
+          image: <your-dsh-image>
+          command: ["/bin/sh", "-c"]
+          args:
+            - test -f /data/dsh/cordis.patch.yml || cp /opt/dsh-cls-observability/agentobs.patch.yml /data/dsh/cordis.patch.yml
+          volumeMounts:
+            - { name: dsh-home, mountPath: /data/dsh }
+        # Optional relay sidecar (Kubernetes >= 1.29 native sidecar): delete if not needed.
+        - name: agentobs-relay
+          image: <your-dsh-image>
+          restartPolicy: Always
+          command: ["node", "/opt/dsh-cls-observability/dsh-cls-observability.mjs", "--relay"]
+          env: &agentobs-env
+            - { name: DSH_HOME, value: /data/dsh }
+            - { name: CLS_AGENTOBS_ENABLED, value: "true" }
+            - { name: CLS_AGENTOBS_REGION, value: ap-guangzhou }
+            - { name: CLS_AGENTOBS_NETWORK, value: internal }
+            - { name: CLS_AGENTOBS_TOPIC_ID, value: <trace-topic-id> }
+            - name: TENCENTCLOUD_SECRET_ID
+              valueFrom: { secretKeyRef: { name: cls-credential, key: secretId } }
+            - name: TENCENTCLOUD_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: cls-credential, key: secretKey } }
+            - { name: CLS_AGENTOBS_ENVIRONMENT, value: production }
+            # Who the runs belong to; per request when one pod serves many users.
+            - { name: CLS_AGENTOBS_USER_ID, value: <user-id> }
+          volumeMounts:
+            - { name: dsh-home, mountPath: /data/dsh }
+      containers:
+        - name: dsh
+          image: <your-dsh-image>
+          # Entrypoint and default command come from Dockerfile.snippet.
+          env: *agentobs-env
+          volumeMounts:
+            - { name: dsh-home, mountPath: /data/dsh }
+      volumes:
+        - name: dsh-home
+          persistentVolumeClaim: { claimName: dsh-home }

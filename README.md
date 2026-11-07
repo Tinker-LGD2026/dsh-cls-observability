@@ -19,8 +19,8 @@ agent runs to [Tencent Cloud CLS AgentObs](https://cloud.tencent.com/document/pr
   checkpoint, and configuration comes only from the real process environment (a cloned repository's `.env` cannot
   enable it, redirect it, or change content capture).
 
-> Status: 0.1.0 preview. Not yet covered: a relay for container deployments, temporary (STS) credentials, turns of a
-> crashed session that is never resumed.
+> Status: 0.1.0 preview. Not covered: temporary (STS) credentials (the CLS AgentObs endpoint documents SecretId /
+> SecretKey only), turns of a crashed session that is never resumed.
 
 ## Requirements
 
@@ -70,6 +70,31 @@ const harness = new DeepSeekHarness({
   env: { ...process.env, CLS_AGENTOBS_ENABLED: 'true', CLS_AGENTOBS_REGION: 'ap-shanghai', CLS_AGENTOBS_TOPIC_ID: '…' },
 })
 ```
+
+## Containers
+
+A container stops the moment its main process exits, which also kills the plugin's detached deliverer. Templates in
+[`deploy/`](deploy):
+
+- [`entrypoint.sh`](deploy/entrypoint.sh) runs DSH, forwards SIGTERM / SIGINT, and after DSH exits delivers what is
+  left (`node dsh-cls-observability.mjs --flush`) before the container stops;
+- [`Dockerfile.snippet`](deploy/Dockerfile.snippet) adds the plugin (checksum-verified), the entrypoint and a patch file
+  to an image that has DSH; no credentials go into the image;
+- [`k8s/deployment.yaml`](deploy/k8s/deployment.yaml): credentials from a Secret, the CLS intranet endpoint, `DSH_HOME`
+  on a PVC (spans left by a crashed or evicted pod are delivered by the next one), a grace period that covers the
+  flush, and an optional native sidecar running `--relay`.
+
+Commands of the plugin file (they read the same `CLS_AGENTOBS_*` variables):
+
+| Command | Does |
+|---|---|
+| `node dsh-cls-observability.mjs --flush [dir]` | Deliver the outbox and journals of dead processes once; exit 0 when empty |
+| `node dsh-cls-observability.mjs --relay [dir]` | Keep delivering every `CLS_AGENTOBS_RELAY_INTERVAL_MS` (5000); final flush on SIGTERM |
+
+The default directory is `$DSH_HOME/agentobs/outbox` (or `CLS_AGENTOBS_DATA_DIR`).
+
+For rotating credentials without restarting DSH, point `CLS_AGENTOBS_CREDENTIALS_FILE` at a file your secret agent
+updates; it is re-read when it changes.
 
 ## Configuration
 

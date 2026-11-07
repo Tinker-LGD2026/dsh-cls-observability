@@ -9,7 +9,7 @@
 - **不丢数据**：每个 Span 发送前先写入本地磁盘日志，进程被直接杀掉（`kill -9`、OOM）也不丢，下次启动补发未确认的部分；正常退出时未发送的 Span 写入本地 outbox，由独立进程补发；CLS 长时间不可达时多出的 Span 转存磁盘而不是丢弃；崩溃时进行中的 turn 会在 DSH 续跑该会话时补上根 Span。
 - **不影响宿主**：插件异常不会传给 DSH；不参与 DSH 的会话检查点；配置只读真实进程环境，克隆来的仓库里的 `.env` 无法开启采集、改写上报地址或修改内容采集设置。
 
-> 状态：0.1.0 预览版。尚未覆盖：容器场景的转发进程、临时密钥（STS）、崩溃后从未续跑的会话中未结束的 turn。
+> 状态：0.1.0 预览版。不支持：临时密钥（STS，CLS AgentObs 上报接口文档只提供 SecretId / SecretKey）；崩溃后从未续跑的会话中未结束的 turn。
 
 ## 运行要求
 
@@ -54,6 +54,25 @@ const harness = new DeepSeekHarness({
   env: { ...process.env, CLS_AGENTOBS_ENABLED: 'true', CLS_AGENTOBS_REGION: 'ap-shanghai', CLS_AGENTOBS_TOPIC_ID: '…' },
 })
 ```
+
+## 容器部署
+
+容器的主进程一退出，容器就会停止，插件的独立补发进程也会被一起杀掉。[`deploy/`](deploy) 下提供了模板：
+
+- [`entrypoint.sh`](deploy/entrypoint.sh)：启动 DSH 并转发 SIGTERM / SIGINT，DSH 退出后先补发剩余数据（`node dsh-cls-observability.mjs --flush`），再退出容器；
+- [`Dockerfile.snippet`](deploy/Dockerfile.snippet)：在已有 DSH 的镜像中加入插件（校验 SHA-256）、入口脚本和 patch 文件，镜像中不含凭证；
+- [`k8s/deployment.yaml`](deploy/k8s/deployment.yaml)：凭证来自 Secret、使用 CLS 内网域名、`DSH_HOME` 放在 PVC 上（崩溃或被驱逐的 Pod 留下的数据由下一个 Pod 补发）、优雅退出时间覆盖补发耗时，并附可选的原生 sidecar（`--relay`）。
+
+插件文件自带的命令（读取同样的 `CLS_AGENTOBS_*` 变量）：
+
+| 命令 | 作用 |
+|---|---|
+| `node dsh-cls-observability.mjs --flush [目录]` | 补发一次 outbox 及已退出进程的写前日志；全部送达时返回 0 |
+| `node dsh-cls-observability.mjs --relay [目录]` | 每隔 `CLS_AGENTOBS_RELAY_INTERVAL_MS`（默认 5000）持续补发；收到 SIGTERM 时最后补发一次 |
+
+默认目录为 `$DSH_HOME/agentobs/outbox`（或 `CLS_AGENTOBS_DATA_DIR`）。
+
+如需不重启 DSH 轮换密钥，可让 `CLS_AGENTOBS_CREDENTIALS_FILE` 指向由密钥管理工具更新的文件，文件变化后插件会自动重读。
 
 ## 配置
 

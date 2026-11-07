@@ -37,6 +37,7 @@
     "dist",
     "README.md",
     "README.zh-CN.md",
+    "deploy",
     "LICENSE"
   ],
   "scripts": {
