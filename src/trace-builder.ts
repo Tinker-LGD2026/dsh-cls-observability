@@ -7,7 +7,7 @@
 import type { AssistantStreamRecord, FinishReason, LlmCallConfig, Message, SessionEvent, SessionHeader, TokenUsage } from './dsh-types.ts'
 import { contentHash, paths, spanIdFor, traceIdFor } from './ids.ts'
 import { SpanKind, StatusCode, double, type Attributes, type SpanEvent, type SpanLink, type SpanRecord } from './otlp/types.ts'
-import { Truncator, contentText, finishReasonName, messageToGenAi, readStream, usageAttributes } from './semconv.ts'
+import { Truncator, contentText, finishReasonName, messageToGenAi, reactFinishReason, readStream, usageAttributes } from './semconv.ts'
 
 export interface BuilderOptions {
   captureContent: boolean
@@ -560,6 +560,11 @@ export class SessionTracer {
     const turnState = this.turns.get(turn)
     if (!step || !turnState) return
     this.steps.delete(key)
+    // Required by the spec, always one of tool_calls / stop / error; the precise chat
+    // outcome travels alongside when it is not one of those.
+    const reactFinish = reactFinishReason(step.lastFinish)
+    const detail = step.lastFinish ?? 'no_model_response'
+    const failed = step.lastChatFailed || step.lastFinish === undefined
     this.emit({
       traceId: turnState.traceId,
       spanId: step.spanId,
@@ -573,9 +578,10 @@ export class SessionTracer {
         'gen_ai.span.kind': 'step',
         'gen_ai.operation.name': 'react',
         'gen_ai.react.round': stepNo,
-        ...(step.lastFinish ? { 'gen_ai.react.finish_reason': step.lastFinish } : {}),
+        'gen_ai.react.finish_reason': reactFinish,
+        ...(detail !== reactFinish ? { 'agent.custom.react_finish_detail': detail } : {}),
       },
-      status: step.lastChatFailed ? { code: StatusCode.Error, message: step.lastFinish ?? 'error' } : { code: StatusCode.Ok },
+      status: failed ? { code: StatusCode.Error, message: detail } : { code: StatusCode.Ok },
       ...(step.links.length > 0 ? { links: step.links } : {}),
     })
   }
@@ -638,6 +644,13 @@ export class SessionTracer {
     if (!turnState || !step) return
     const facts = readStream(data.stream)
     if (facts.firstTokenTime === undefined && hints.chatFirstTokenMs !== undefined) facts.firstTokenTime = hints.chatFirstTokenMs
+    // A committed answer whose stream record carries no finish chunk (e.g. an empty or
+    // compacted stream): it completed, and its content tells how.
+    let finishInferred = false
+    if (!facts.finish && event.type === 'assistant/message' && !data.interrupted && data.message) {
+      facts.finish = { kind: data.message.content.some((b) => b.type === 'tool-call') ? 'tool-calls' : 'stop' } as FinishReason
+      finishInferred = true
+    }
     const approxStart = hints.chatStartMs === undefined
     const startMs = Math.min(hints.chatStartMs ?? step.baselineMs, event.time)
     const isMessage = event.type === 'assistant/message'
@@ -654,6 +667,7 @@ export class SessionTracer {
       ttftApprox: approxStart,
       usage: data.usage ?? facts.usage,
       finish: facts.finish,
+      ...(finishInferred ? { extraAttrs: { 'agent.custom.finish_inferred': true } } : {}),
       interrupted: data.interrupted === true,
       output: isMessage ? data.message : undefined,
       inputAttrs: this.chatInputAttributes(),
@@ -665,7 +679,7 @@ export class SessionTracer {
     this.emit(span)
     step.chatCount++
     step.lastChatId = span.spanId
-    step.lastFinish = facts.finish ? finishReasonName(facts.finish.kind) : (data.interrupted ? 'interrupted' : undefined)
+    step.lastFinish = facts.finish ? finishReasonName(facts.finish.kind) : (data.interrupted ? 'interrupted' : 'unknown')
     step.lastChatFailed = span.status?.code === StatusCode.Error
     step.baselineMs = event.time
     if (isMessage) {
@@ -813,6 +827,7 @@ export class SessionTracer {
     output?: Message
     inputAttrs?: Attributes
     contentAttrs?: Attributes
+    extraAttrs?: Attributes
     replayable: boolean
     events: SpanEvent[]
     retryOf?: string
@@ -826,6 +841,8 @@ export class SessionTracer {
     const model = input.model ?? this.config?.model
     const finishKind = input.finish?.kind
     const failed = input.abandoned || input.interrupted || finishKind === 'error' || finishKind === 'aborted'
+    // Required on chat: an attempt cut short without a finish chunk still has an outcome.
+    const chatFinish = finishKind ? finishReasonName(finishKind) : input.interrupted ? 'cancelled' : input.abandoned ? 'error' : undefined
     const end = input.finishMs ?? input.endMs
     const attrs: Attributes = {
       ...this.common(input.turn, input.step),
@@ -833,15 +850,19 @@ export class SessionTracer {
       'gen_ai.operation.name': 'chat',
       ...(provider ? { 'gen_ai.provider.name': systemName(provider), 'agent.custom.provider_route': provider } : {}),
       ...(model ? { 'gen_ai.request.model': model, 'gen_ai.response.model': model } : {}),
-      ...(finishKind ? { 'gen_ai.response.finish_reasons': [finishReasonName(finishKind)] } : {}),
+      ...(chatFinish ? { 'gen_ai.response.finish_reasons': [chatFinish] } : {}),
+      ...(input.step !== undefined ? { 'gen_ai.react.round': input.step } : {}),
       'gen_ai.chat.duration_ms': ms(end - input.startMs),
       ...(input.firstTokenMs !== undefined ? { 'gen_ai.response.time_to_first_token_ms': ms(input.firstTokenMs - input.startMs) } : {}),
       ...(input.ttftApprox && this.options.source === 'replay' ? { 'agent.custom.ttft_approx': true } : {}),
       ...usageAttributes(input.usage),
+      // The provider reported no usage: say so instead of reporting zero tokens.
+      ...(input.usage ? {} : { 'agent.custom.usage_unavailable': true }),
       ...(input.purpose ? {} : this.requestAttributes()),
       ...(input.purpose ? { 'agent.custom.llm_purpose': input.purpose } : {}),
       ...(input.retryOf && input.retryIndex ? { 'agent.custom.retry_of': input.retryOf, 'agent.custom.retry_index': input.retryIndex } : {}),
       ...(input.replayable ? {} : { 'agent.custom.replayable': false }),
+      ...input.extraAttrs,
       ...(finishKind === 'error' || finishKind === 'aborted'
         ? { 'error.type': String(input.finish?.failure?.code ?? finishKind) }
         : {}),
@@ -1068,7 +1089,7 @@ export class SessionTracer {
       'gen_ai.span.kind': 'tool',
       'gen_ai.operation.name': 'execute_tool',
       'gen_ai.tool.name': tool.name,
-      'gen_ai.tool.type': 'function',
+      'gen_ai.tool.type': mcp ? 'mcp' : 'function',
       'gen_ai.tool.call.id': tool.callId,
       ...(duration !== undefined ? { 'gen_ai.tool.call.duration_ms': ms(duration), 'agent.custom.duration_source': durationSource } : {}),
       ...(notDispatched ? { 'agent.custom.not_dispatched': true } : {}),

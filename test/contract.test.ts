@@ -6,6 +6,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readSessionLog, replaySession, replaySessionGroup } from '../src/replay.ts'
+import { fromRecord, validateSpans } from '../src/spec-check.ts'
 import type { SpanRecord } from '../src/otlp/types.ts'
 import { fromSpan, renderTree as renderNodes } from '../src/tree.ts'
 
@@ -203,6 +204,21 @@ describe.skipIf(logs.length === 0)('chat input deltas and subagent names (groupe
     }
     expect(named).toBeGreaterThan(5)
   })
+})
+
+describe.skipIf(logs.length === 0)('CLS AgentObs spec validation of every recording', () => {
+  const groups = new Map<string, string[]>()
+  for (const f of logs) groups.set(path.dirname(f), [...(groups.get(path.dirname(f)) ?? []), f])
+  for (const content of [false, true]) {
+    it(`has no spec violations (content ${content ? 'on' : 'off'})`, () => {
+      const issues: string[] = []
+      for (const files of groups.values()) {
+        const spans = replaySessionGroup(files.map(readSessionLog), { ...options, captureContent: content }).flat()
+        for (const i of validateSpans(spans.map(fromRecord), { content, complete: true })) issues.push(`${rel(files[0]!)}: ${i.span}: ${i.problem}`)
+      }
+      expect(issues.slice(0, 20)).toEqual([])
+    })
+  }
 })
 
 const pick = (name: string) => logs.find((f) => rel(f) === name)

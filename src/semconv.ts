@@ -54,11 +54,29 @@ export function readStream(stream: readonly AssistantStreamRecord[] | undefined)
 }
 
 /** DSH FinishReason.kind → OTel GenAI finish reason. Unknown kinds pass through. */
+/** DSH finish kind → `gen_ai.response.finish_reasons` value (stop / tool_calls / length / cancelled / error). */
 export function finishReasonName(kind: string): string {
   switch (kind) {
     case 'tool-calls': return 'tool_calls'
     case 'max-tokens': return 'length'
-    default: return kind
+    case 'aborted': return 'cancelled'
+    case 'stop':
+    case 'error': return kind
+    default: return kind.replace(/-/g, '_')
+  }
+}
+
+/**
+ * Chat finish reason → `gen_ai.react.finish_reason` (tool_calls / stop / error). A round
+ * cut at the output limit still ended without tool calls (`stop`); an interrupted or
+ * failed round is `error`. DSH has no round limit, so `max_rounds` never occurs.
+ */
+export function reactFinishReason(chatFinish: string | undefined): string {
+  switch (chatFinish) {
+    case 'tool_calls': return 'tool_calls'
+    case 'stop':
+    case 'length': return 'stop'
+    default: return 'error'
   }
 }
 

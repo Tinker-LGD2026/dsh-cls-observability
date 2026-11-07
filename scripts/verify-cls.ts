@@ -4,6 +4,7 @@ import path from 'node:path'
 import type { DevSecrets } from './dev-secrets.ts'
 import { searchSpans, type StoredSpan } from './cls-api.ts'
 import { renderTree, type TreeNode } from '../src/tree.ts'
+import { fromStored, validateSpans } from '../src/spec-check.ts'
 
 export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: number, outboxDir: string): Promise<boolean> {
   let spans: StoredSpan[] = []
@@ -66,9 +67,12 @@ export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: n
     && chatsInOrder.every((s) => (s.attribute['gen_ai.input.messages'] === undefined) !== (s.attribute['gen_ai.input.messages_delta'] === undefined))
     && kindIs('agent').every((s) => s.attribute['gen_ai.agent.scope'] !== 'subagent' || s.attribute['gen_ai.agent.name'] !== 'subagent')
   console.log(`content/naming check: ${contentOk ? 'OK' : 'MISSING'}`)
+  const specIssues = validateSpans(spans.map(fromStored), { content: true, complete: true, stored: true })
+  console.log(`spec check: ${specIssues.length === 0 ? 'OK' : `${specIssues.length} issues`}`)
+  for (const i of specIssues.slice(0, 15)) console.log(`  ${i.span}: ${i.problem}`)
   const leftover = existsSync(outboxDir) ? readdirSync(outboxDir) : []
   console.log(`outbox leftover files: ${leftover.length}`)
-  const ok = ['entry', 'agent', 'step', 'chat', 'tool'].every((k) => kinds.has(k)) && orphans.length === 0 && leftover.length === 0 && contentOk
+  const ok = ['entry', 'agent', 'step', 'chat', 'tool'].every((k) => kinds.has(k)) && orphans.length === 0 && leftover.length === 0 && contentOk && specIssues.length === 0
   console.log(ok ? 'CLS VERIFY PASS' : 'CLS VERIFY FAIL')
   return ok
 }
