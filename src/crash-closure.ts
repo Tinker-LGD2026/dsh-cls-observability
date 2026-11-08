@@ -26,9 +26,16 @@ export interface InterruptedTail {
 const isSyntheticResult = (e: SessionEvent | undefined) =>
   e?.type === 'tool/result' && String((e.data as { message?: { id?: unknown } })?.message?.id ?? '').startsWith('interrupted-tool-result-')
 
+/** Events that shape turns; anything else (seed markers, titles, jobs, …) may trail the closers. */
+const isStructural = (e: SessionEvent) =>
+  e.type.startsWith('turn/') || e.type.startsWith('step/') || e.type.startsWith('tool/') || e.type === 'assistant/message' || e.type === 'user/message'
+
 /** The crash-closed turn at the end of a restored log, if any. */
 export function interruptedTail(events: readonly SessionEvent[]): InterruptedTail | undefined {
-  const n = events.length
+  // On resume DSH 0.2.2 appends `session/end-seed` (and may append other markers) after the
+  // closers; look past them for the last turn-shaping event.
+  let n = events.length
+  while (n > 0 && !isStructural(events[n - 1]!)) n--
   const last = events[n - 1]
   const reason = (last?.data as { reason?: { kind?: unknown } } | undefined)?.reason
   if (!last || last.type !== 'turn/end' || reason?.kind !== 'interrupted') return undefined

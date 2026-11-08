@@ -6,7 +6,10 @@ import { searchSpans, type StoredSpan } from './cls-api.ts'
 import { renderTree, type TreeNode } from '../src/tree.ts'
 import { fromStored, validateSpans } from '../src/spec-check.ts'
 
-export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: number, outboxDir: string): Promise<boolean> {
+/** Scenario-specific checks on the deduplicated stored spans of the run; true when they pass. */
+export type ExtraCheck = (spans: StoredSpan[], info: { duplicates: number }) => boolean
+
+export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: number, outboxDir: string, extra?: ExtraCheck, minPolls = 2): Promise<boolean> {
   let spans: StoredSpan[] = []
   for (let i = 0; i < 12; i++) {
     await new Promise((r) => setTimeout(r, 10_000))
@@ -17,7 +20,7 @@ export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: n
       spans = (await searchSpans(secrets, ...window)).filter((s) => s.attribute['agent.custom.e2e_run'] === runId)
     }
     console.log(`poll ${i + 1}: ${spans.length} spans in CLS`)
-    if (spans.length > 0 && i >= 1) break
+    if (spans.length > 0 && i >= minPolls - 1) break
   }
 
   const totalStored = spans.length
@@ -70,14 +73,17 @@ export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: n
   const specIssues = validateSpans(spans.map(fromStored), { content: true, complete: true, stored: true })
   console.log(`spec check: ${specIssues.length === 0 ? 'OK' : `${specIssues.length} issues`}`)
   for (const i of specIssues.slice(0, 15)) console.log(`  ${i.span}: ${i.problem}`)
-  const leftover = existsSync(outboxDir) ? readdirSync(outboxDir) : []
+  // Undelivered data only: span files and journals (not the closed-turns ledger).
+  const leftover = existsSync(outboxDir) ? readdirSync(outboxDir).filter((f) => f.includes('.otlp.gz') || f.includes('.wal')) : []
   console.log(`outbox leftover files: ${leftover.length}`)
   // One task = one session: a subagent's spans carry the session of the task that spawned it.
   const sessionsPerTrace = new Map<string, Set<string>>()
   for (const s of spans) sessionsPerTrace.set(s.traceID, (sessionsPerTrace.get(s.traceID) ?? new Set()).add(String(s.attribute['gen_ai.session.id'])))
   const oneSession = [...sessionsPerTrace.values()].every((v) => v.size === 1)
   console.log(`session.id per trace: ${oneSession ? 'single' : 'MIXED'}`)
-  const ok = ['entry', 'agent', 'step', 'chat', 'tool'].every((k) => kinds.has(k)) && orphans.length === 0 && leftover.length === 0 && contentOk && specIssues.length === 0 && oneSession
+  const extraOk = extra ? extra(spans, { duplicates }) : true
+  if (extra) console.log(`scenario check: ${extraOk ? 'OK' : 'FAIL'}`)
+  const ok = ['entry', 'agent', 'step', 'chat', 'tool'].every((k) => kinds.has(k)) && orphans.length === 0 && leftover.length === 0 && contentOk && specIssues.length === 0 && oneSession && extraOk
   console.log(ok ? 'CLS VERIFY PASS' : 'CLS VERIFY FAIL')
   return ok
 }

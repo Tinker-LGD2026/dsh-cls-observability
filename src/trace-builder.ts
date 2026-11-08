@@ -86,7 +86,7 @@ export interface AbandonedAttempt {
 export type TurnResolver = (sessionId: string, atMs: number, requireEnded: boolean) => TurnRef | undefined
 
 /** Resolves a subagent's name from its parent's `subagent/catalog` (parentSessionId, childSessionId). */
-export type NameResolver = (parentSessionId: string, childSessionId: string) => string | undefined
+export type NameResolver = (parentSessionId: string, childSessionId: string) => Pick<CatalogEntry, 'name' | 'label'> | undefined
 
 /** Resolves the task (root session) a known session belongs to; undefined when unknown. */
 export type RootResolver = (sessionId: string) => string | undefined
@@ -230,6 +230,26 @@ function recentFrom(messages: readonly Message[], budget: number): number {
   return from
 }
 
+export interface CatalogEntry {
+  childId: string
+  /** Display name: the reserved name (newer DSH), else the creation label (0.2.2-rc.1). */
+  name?: string
+  label?: string
+}
+
+/**
+ * A `subagent/catalog` fact. DSH 0.2.2-rc.1 (catalog version 0) records only a `label` —
+ * the description the model gave the task, shown next to the child id by `list_agents`;
+ * later versions add a sibling-unique `name` such as `agent-1`.
+ */
+export function catalogEntry(data: unknown): CatalogEntry | undefined {
+  const d = data as { childId?: unknown; name?: unknown; label?: unknown } | undefined
+  if (!d || typeof d.childId !== 'string') return undefined
+  const label = typeof d.label === 'string' && d.label.trim() ? d.label.trim().slice(0, 80) : undefined
+  const name = typeof d.name === 'string' && d.name.trim() ? d.name.trim() : label
+  return { childId: d.childId, ...(name ? { name } : {}), ...(label ? { label } : {}) }
+}
+
 /** Short, stable key of a subagent's own DSH session id (its last id segment). */
 export function childKey(sessionId: string): string {
   const tail = sessionId.slice(sessionId.lastIndexOf('-') + 1)
@@ -269,7 +289,7 @@ export class SessionTracer {
   /** Surface index up to which reported bodies were released. */
   private released = 0
   private historyUnknown = false
-  private catalog = new Map<string, string>()
+  private catalog = new Map<string, CatalogEntry>()
   private config?: LlmCallConfig
   private contextWindow?: number
   private toolDefinitions?: unknown[]
@@ -330,7 +350,7 @@ export class SessionTracer {
   }
 
   /** Name of a direct child recorded in this session's `subagent/catalog`. */
-  childName(childId: string): string | undefined {
+  childEntry(childId: string): CatalogEntry | undefined {
     return this.catalog.get(childId)
   }
 
@@ -376,9 +396,11 @@ export class SessionTracer {
       case 'request/context':
         if (typeof data.contextWindow === 'number') this.contextWindow = data.contextWindow
         break
-      case 'subagent/catalog':
-        if (typeof data.childId === 'string' && typeof data.name === 'string' && data.name) this.catalog.set(data.childId, data.name)
+      case 'subagent/catalog': {
+        const entry = catalogEntry(data)
+        if (entry) this.catalog.set(entry.childId, entry)
         break
+      }
     }
   }
 
@@ -1271,9 +1293,13 @@ export class SessionTracer {
    * among siblings, e.g. `agent-1`) — the name the model addresses them by. Resolved lazily
    * at emit time because the parent records it during spawn.
    */
+  private catalogFacts(): Pick<CatalogEntry, 'name' | 'label'> | undefined {
+    return this.header.parentSession ? this.resolveName?.(this.header.parentSession, this.sessionId) : undefined
+  }
+
   private agentName(): string {
     if (this.header.origin === 'subagent' || this.header.parentSession) {
-      const name = this.header.parentSession ? this.resolveName?.(this.header.parentSession, this.sessionId) : undefined
+      const name = this.catalogFacts()?.name
       if (name) return name
       if (this.header.origin === 'subagent') return this.header.agentPreset ?? 'subagent'
     }
@@ -1325,6 +1351,7 @@ export class SessionTracer {
       ...(this.header.origin === 'subagent' ? { 'gen_ai.agent.scope': 'subagent' } : {}),
       ...(this.parent ? { 'gen_ai.subagent.parent_tool_call.id': this.parent.callId } : {}),
       ...(this.header.parentSession ? { 'agent.custom.parent_session_id': this.header.parentSession } : {}),
+      ...(this.header.origin === 'subagent' && this.catalogFacts()?.label ? { 'agent.custom.subagent_label': this.catalogFacts()!.label! } : {}),
       ...(typeof this.header.delegationDepth === 'number' && this.header.delegationDepth > 0 ? { 'agent.custom.delegation_depth': this.header.delegationDepth } : {}),
       ...(this.options.source === 'replay' ? { 'agent.custom.source': 'replay' } : {}),
     }

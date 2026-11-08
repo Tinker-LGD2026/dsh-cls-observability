@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto'
 import type { AgentLike, AssistantStreamFrame, FinishReason, GenerateOptions, Message, SessionEvent, SessionLike, StreamChunk, TokenUsage, ToolDispatchExecution } from './dsh-types.ts'
 import type { Attributes, SpanRecord } from './otlp/types.ts'
 import { interruptedTail, type ClosedTurns } from './crash-closure.ts'
-import { SessionTracer, type BuilderOptions, type TurnRef } from './trace-builder.ts'
+import { SessionTracer, type BuilderOptions, type NameResolver, type TurnRef } from './trace-builder.ts'
 
 export interface CollectorOptions {
   builder: Omit<BuilderOptions, 'source'>
@@ -104,8 +104,8 @@ export class Collector {
   private resolveRoot = (sessionId: string): string | undefined =>
     (this.tracers.get(sessionId) ?? this.retired.get(sessionId))?.rootSessionId()
 
-  private resolveName = (parentSessionId: string, childSessionId: string): string | undefined =>
-    (this.tracers.get(parentSessionId) ?? this.retired.get(parentSessionId))?.childName(childSessionId)
+  private resolveName: NameResolver = (parentSessionId, childSessionId) =>
+    (this.tracers.get(parentSessionId) ?? this.retired.get(parentSessionId))?.childEntry(childSessionId)
 
   /** @param beforeSeq - first seq that will be delivered live (seed history stops before it). */
   private tracerFor(session: SessionLike, beforeSeq?: number): SessionTracer | undefined {

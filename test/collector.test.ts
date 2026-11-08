@@ -226,6 +226,14 @@ describe('Collector: closing a turn left open by a crash', () => {
     expect(new Set(spans.map((x) => x.traceId)).size).toBe(1)
   })
 
+  it('finds the closers when DSH appends a seed marker after them on resume (0.2.2-rc.1)', () => {
+    const log = crashedLog()
+    log.push({ type: 'session/end-seed', seq: log.length, time: 5000, data: {} } as SessionEvent)
+    const { ctx, spans } = setupWith(closedTurns())
+    ctx.emit('session/created', restored('K4', log))
+    expect(spans.map(kind).sort()).toEqual(['agent', 'entry', 'step', 'tool'])
+  })
+
   it('does not emit a step that had completed before the crash', () => {
     const log = crashedLog().slice(0, 9)
     log.push(
@@ -321,6 +329,27 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
     // No session/created: the plugin attached after the session existed.
     turn(ctx, append, 1, 'q', 'a')
     expect((chats(spans)[0]!.attributes['gen_ai.input.messages'] as unknown[]).length).toBe(1)
+  })
+
+  it('names a subagent by its creation label when the catalog has no name (DSH 0.2.2-rc.1)', async () => {
+    const { ctx, spans } = liveSetup()
+    const parent = liveSession('P9')
+    ctx.emit('session/created', parent.s)
+    parent.append(ctx, 'turn/start', { turn: 1 })
+    parent.append(ctx, 'step/start', { turn: 1, step: 1 })
+    parent.append(ctx, 'tool/call', { turn: 1, step: 1, callId: 'c9', name: 'subagent', arguments: '{}' })
+    const child = liveSession('c6b59b4a-589c-4e39-8e7c-4b642ddf7a15', { parentSession: 'P9', origin: 'subagent' })
+    await ctx.waterfall('tools/execute', { callId: 'c9', rootCallId: 'c9', name: 'subagent', agent: { session: parent.s } }, async () => {
+      parent.append(ctx, 'subagent/catalog', { version: 0, childId: child.s.id, childCreatedAt: 0, mode: 'continuable', label: 'Reply subagent-ok' })
+      ctx.emit('session/created', child.s)
+      return {}
+    })
+    turn(ctx, child.append, 1, 'go', 'done')
+    const agent = spans.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.agent.id'] === child.s.id)!
+    expect(agent.attributes['gen_ai.agent.name']).toBe('Reply subagent-ok')
+    expect(agent.name).toBe('invoke_agent Reply subagent-ok')
+    expect(agent.attributes['agent.custom.subagent_label']).toBe('Reply subagent-ok')
+    expect(agent.attributes['gen_ai.turn.id']).toBe('P9:4b642ddf7a15:t1')
   })
 
   it('names a subagent by the name its parent reserved in subagent/catalog', async () => {

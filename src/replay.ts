@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import * as zlib from 'node:zlib'
 import type { SessionEvent, SessionHeader } from './dsh-types.ts'
 import type { SpanRecord } from './otlp/types.ts'
-import { SessionTracer, type BuilderOptions, type NameResolver, type RootResolver } from './trace-builder.ts'
+import { catalogEntry, SessionTracer, type BuilderOptions, type CatalogEntry, type NameResolver, type RootResolver } from './trace-builder.ts'
 
 export interface SessionLog {
   header: SessionHeader
@@ -86,12 +86,11 @@ export function replaySession(log: SessionLog, options: Omit<BuilderOptions, 'so
 
 /** Child names from every parent's `subagent/catalog`, keyed `${parentId}|${childId}`. */
 export function catalogNames(logs: readonly SessionLog[]): NameResolver {
-  const names = new Map<string, string>()
+  const names = new Map<string, CatalogEntry>()
   for (const log of logs) {
     for (const e of log.events) {
-      if (e.type === 'subagent/catalog' && typeof e.data?.childId === 'string' && typeof e.data?.name === 'string') {
-        names.set(`${log.header.id}|${e.data.childId}`, e.data.name)
-      }
+      const entry = e.type === 'subagent/catalog' ? catalogEntry(e.data) : undefined
+      if (entry) names.set(`${log.header.id}|${entry.childId}`, entry)
     }
   }
   return (parent, child) => names.get(`${parent}|${child}`)

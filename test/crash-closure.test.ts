@@ -30,8 +30,12 @@ describe.skipIf(!available)('crash closer detection vs DSH interruptedTurnCloser
         const closers = dsh.interruptedTurnClosers(prefix)
         if (closers.length === 0) continue
         points++
-        const tail = interruptedTail([...prefix, ...closers])
-        if (tail?.closerStart !== n) misses.push(`${path.relative(root, file)}@${n}`)
+        // On resume DSH also appends a seed marker after its closers.
+        const endSeed = { type: 'session/end-seed', seq: prefix.length + closers.length, time: 0, data: {} } as unknown as SessionEvent
+        for (const restored of [[...prefix, ...closers], [...prefix, ...closers, endSeed]]) {
+          const tail = interruptedTail(restored)
+          if (tail?.closerStart !== n) misses.push(`${path.relative(root, file)}@${n}`)
+        }
       }
     }
     expect(points).toBeGreaterThan(5000)
