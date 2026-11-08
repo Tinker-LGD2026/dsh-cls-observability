@@ -52,6 +52,7 @@
     "e2e:web": "node scripts/e2e-web.ts",
     "e2e:crash": "node scripts/e2e-crash.ts",
     "e2e:compaction": "node scripts/e2e.ts --compaction",
+    "trial:docker-web": "node scripts/docker-web.ts",
     "verify:linux": "scripts/linux-verify.sh test e2e ptc web crash compaction",
     "e2e:sdk": "DSH=${DSH_REPO:-../deepseek-harness}; TSX_TSCONFIG_PATH=$DSH/tsconfig.json node --import $DSH/node_modules/tsx/dist/esm/index.mjs scripts/e2e-sdk.ts"
   },
