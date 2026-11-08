@@ -17,7 +17,7 @@ import path from 'node:path'
 const SUFFIX = '.otlp.gz'
 const CLAIM = '.sending-'
 
-function alive(pid: number): boolean {
+export function alive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true

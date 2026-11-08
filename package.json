@@ -53,7 +53,10 @@
     "e2e:crash": "node scripts/e2e-crash.ts",
     "e2e:compaction": "node scripts/e2e.ts --compaction",
     "trial:docker-web": "node scripts/docker-web.ts",
-    "verify:linux": "scripts/linux-verify.sh test e2e ptc web crash compaction",
+    "verify:linux": "scripts/linux-verify.sh test e2e ptc web crash compaction sdk sdk-minimal acp nested",
+    "verify:linux-amd64": "LINUX_PLATFORM=linux/amd64 scripts/linux-verify.sh e2e ptc crash compaction sdk acp nested",
+    "e2e:acp": "node scripts/e2e-acp.ts",
+    "e2e:nested": "node scripts/e2e.ts --nested",
     "e2e:sdk": "DSH=${DSH_REPO:-../deepseek-harness}; TSX_TSCONFIG_PATH=$DSH/tsconfig.json node --import $DSH/node_modules/tsx/dist/esm/index.mjs scripts/e2e-sdk.ts"
   },
   "devDependencies": {

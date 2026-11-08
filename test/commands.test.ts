@@ -27,15 +27,24 @@ async function endpoint() {
 const span = (i: number) => ({ traceId: '0'.repeat(32), spanId: i.toString(16).padStart(16, '0'), name: 's', kind: SpanKind.Internal, startNs: 1n, endNs: 2n, attributes: {} })
 const header = { resource: {}, scope: { name: 't', version: '0' } }
 
-function run(args: string[], env: Record<string, string>, signalAfterMs?: number) {
+function run(args: string[], env: Record<string, string>) {
   const child = spawn(process.execPath, [path.join(import.meta.dirname, '..', 'src', 'index.ts'), ...args], {
     env: { PATH: process.env.PATH ?? '', HOME: tmpdir(), CLS_AGENTOBS_ENABLED: 'true', CLS_AGENTOBS_ALLOW_HTTP: 'true', ...env },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
   let stderr = ''
   child.stderr.on('data', (d) => { stderr += d })
-  if (signalAfterMs !== undefined) setTimeout(() => child.kill('SIGTERM'), signalAfterMs)
-  return new Promise<{ code: number | null; stderr: string }>((resolve) => child.on('exit', (code) => resolve({ code, stderr })))
+  const exited = new Promise<{ code: number | null; stderr: string }>((resolve) => child.on('exit', (code) => resolve({ code, stderr })))
+  return Object.assign(exited, { child, output: () => stderr })
+}
+
+/** Poll until `test` holds; slow hosts (emulation, loaded CI) make fixed sleeps flaky. */
+async function until(test: () => boolean, ms = 15_000) {
+  const end = Date.now() + ms
+  while (!test()) {
+    if (Date.now() > end) throw new Error('condition not met in time')
+    await new Promise((r) => setTimeout(r, 50))
+  }
 }
 
 describe('operator commands', () => {
@@ -70,16 +79,19 @@ describe('operator commands', () => {
     const outbox = new Outbox(dir)
     outbox.ensure()
     const server = await endpoint()
-    const running = run(['--relay', dir], { CLS_AGENTOBS_ENDPOINT: server.url, CLS_AGENTOBS_RELAY_INTERVAL_MS: '100' }, 1500)
-    await new Promise((r) => setTimeout(r, 400))
+    const running = run(['--relay', dir], { CLS_AGENTOBS_ENDPOINT: server.url, CLS_AGENTOBS_RELAY_INTERVAL_MS: '100' })
+    // The SIGTERM handler is installed before this line is printed.
+    await until(() => running.output().includes('relay: delivering'))
     outbox.spillSync(encodeGzipBody({ ...header, spans: [span(1)] }))
-    await new Promise((r) => setTimeout(r, 400))
+    await until(() => server.count() === 1)
     outbox.spillSync(encodeGzipBody({ ...header, spans: [span(2)] }))
+    await until(() => server.count() === 2)
+    running.child.kill('SIGTERM')
     const result = await running
     expect(result.code).toBe(0)
     expect(server.count()).toBe(2)
     expect(outbox.pending()).toHaveLength(0)
-  }, 20_000)
+  }, 30_000)
 
   it('refuses to run without configuration', async () => {
     const result = await run(['--flush'], { CLS_AGENTOBS_ENABLED: 'false' })

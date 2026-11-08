@@ -246,6 +246,38 @@ describe('Collector: closing a turn left open by a crash', () => {
     expect(spans.map(kind).sort()).toEqual(['agent', 'entry'])
   })
 
+  it('skips spans the dead process already emitted for events the log never got', () => {
+    // First: what a closure would emit with no knowledge of the dead process.
+    const probe = setupWith(closedTurns())
+    probe.ctx.emit('session/created', restored('K5', crashedLog()))
+    const stepAndTool = probe.spans.filter((x) => kind(x) === 'step' || kind(x) === 'tool').map((x) => x.spanId)
+    expect(stepAndTool).toHaveLength(2)
+    // The dead process had emitted those two (DSH dispatched tool/result and step/end before persisting them).
+    const ctx = new FakeContext()
+    const spans: SpanRecord[] = []
+    new Collector({
+      builder: { captureContent: false, maxContentChars: 1000, commonAttributes: {} },
+      includeAuxiliary: true, sampleRatio: 1, emit: (x) => spans.push(x), log: () => {}, closedTurns: closedTurns(),
+      emittedSpans: { lookup: (key) => ({ spanIds: new Set(key === 'K5:t2' ? stepAndTool : []), ended: false }) },
+    }).attach(ctx)
+    ctx.emit('session/created', restored('K5', crashedLog()))
+    expect(spans.map(kind).sort()).toEqual(['agent', 'entry'])
+  })
+
+  it('closes nothing when the dead process saw the turn end', () => {
+    const ctx = new FakeContext()
+    const spans: SpanRecord[] = []
+    const closed = closedTurns()
+    new Collector({
+      builder: { captureContent: false, maxContentChars: 1000, commonAttributes: {} },
+      includeAuxiliary: true, sampleRatio: 1, emit: (x) => spans.push(x), log: () => {}, closedTurns: closed,
+      emittedSpans: { lookup: () => ({ spanIds: new Set(), ended: true }) },
+    }).attach(ctx)
+    ctx.emit('session/created', restored('K6', crashedLog()))
+    expect(spans).toEqual([])
+    expect(closed.has('K6:t2')).toBe(true)
+  })
+
   it('closes a crashed turn once, however often the session is reopened', () => {
     const closed = closedTurns()
     const first = setupWith(closed)

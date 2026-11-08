@@ -4,9 +4,11 @@
  * `patches` and the CLS variables in `env` (based on the parent env: the SDK's
  * `env` replaces the child environment entirely).
  *
- * Runs DSH from source (this checkout's built lib/ predates 0.2.2), mirroring the
- * SDK's own source-launch mode. Execute under tsx:
- *   node --import <dsh>/node_modules/tsx/dist/esm/index.mjs scripts/e2e-sdk.ts
+ * Two modes:
+ *  - SDK_CLIENT=<path to an installed @deepseek-ai/dsh-sdk-client>: the published client
+ *    and the DSH it depends on, used exactly as a customer would (`new DeepSeekHarness`);
+ *  - otherwise DSH from a source checkout, run under tsx:
+ *      node --import <dsh>/node_modules/tsx/dist/esm/index.mjs scripts/e2e-sdk.ts
  */
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -19,7 +21,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
 // A DeepSeek Harness source checkout (default: a sibling directory).
 const dsh = path.resolve(process.env.DSH_REPO ?? path.join(root, '../deepseek-harness'))
-const { createProcessDeepSeekHarness } = await import(pathToFileURL(path.join(dsh, 'packages/sdk/client/src/api.ts')).href)
+const sdkClient = process.env.SDK_CLIENT
 
 const runId = randomUUID()
 const work = path.join(root, '.tmp', `e2e-sdk-${runId.slice(0, 8)}`)
@@ -46,7 +48,7 @@ const env = {
 }
 
 const tsx = pathToFileURL(path.join(dsh, 'node_modules/tsx/dist/esm/index.mjs')).href
-const runtime = {
+const sourceRuntime = () => ({
   command: process.execPath,
   args: [
     '--import', tsx, path.join(dsh, 'apps/cli/src/bin.ts'), '--profile', 'sdk',
@@ -57,11 +59,22 @@ const runtime = {
   environment: () => env,
   description: 'dsh profile "sdk" (source)',
   initializeTimeoutMs: 60_000,
-}
+})
 
-console.log(`run ${runId} profile=sdk`)
+console.log(`run ${runId} profile=${process.env.SDK_PROFILE ?? 'sdk'} (${sdkClient ? 'published @deepseek-ai/dsh-sdk-client' : 'source'})`)
 const started = Date.now()
-const harness = createProcessDeepSeekHarness(runtime, { cwd: workspace })
+const harness = sdkClient
+  // The customer integration: the plugin patch and the CLS variables, nothing else.
+  ? new (await import(pathToFileURL(path.join(path.resolve(sdkClient), 'lib/index.js')).href)).DeepSeekHarness({
+    cwd: workspace,
+    processCwd: workspace,
+    dshHome: home,
+    patches: [patch],
+    ...(process.env.SDK_PROFILE ? { profile: process.env.SDK_PROFILE } : {}),
+    env,
+    initializeTimeoutMs: 60_000,
+  })
+  : (await import(pathToFileURL(path.join(dsh, 'packages/sdk/client/src/api.ts')).href)).createProcessDeepSeekHarness(sourceRuntime(), { cwd: workspace })
 let ok = false
 try {
   const result = await harness.run('Use your bash tool to run exactly: echo agentobs-sdk-ok . Then reply with only the command output.')

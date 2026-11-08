@@ -112,7 +112,8 @@ const crashCheck = (spans: StoredSpan[], info: { duplicates: number }) => {
   return info.duplicates === 0
     && t1.filter((s) => kind(s) === 'chat').length >= 2 // journaled before the crash, recovered
     && entry1 !== undefined && entry1.statusCode !== 'OK' && closed.some((s) => kind(s) === 'entry') && closed.some((s) => kind(s) === 'agent')
-    && tools1.length === 2 && tools1.filter((s) => s.statusCode === 'ERROR').length === 1
+    // Two tool calls, each exactly once (the sandbox may refuse them: emulated hosts lack Landlock).
+    && tools1.length === 2 && new Set(tools1.map((s) => s.spanID)).size === 2
     && t2.some((s) => kind(s) === 'entry') && t2.some((s) => kind(s) === 'chat')
     && new Set(t1.map((s) => s.traceID)).size === 1
 }

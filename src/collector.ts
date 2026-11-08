@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
 import type { AgentLike, AssistantStreamFrame, FinishReason, GenerateOptions, Message, SessionEvent, SessionLike, StreamChunk, TokenUsage, ToolDispatchExecution } from './dsh-types.ts'
 import type { Attributes, SpanRecord } from './otlp/types.ts'
-import { interruptedTail, type ClosedTurns } from './crash-closure.ts'
+import { interruptedTail, type ClosedTurns, type EmittedSpans } from './crash-closure.ts'
 import { SessionTracer, type BuilderOptions, type NameResolver, type TurnRef } from './trace-builder.ts'
 
 export interface CollectorOptions {
@@ -24,6 +24,8 @@ export interface CollectorOptions {
   log: (level: 'debug' | 'warn', message: string) => void
   /** Turns already closed after a crash (shared across processes); omitted disables closing. */
   closedTurns?: ClosedTurns
+  /** Spans earlier processes emitted for turns that had not ended (see OpenSpansLedger). */
+  emittedSpans?: EmittedSpans
 }
 
 interface LiveAttempt {
@@ -158,13 +160,21 @@ export class Collector {
     if (!closed || !tail) return
     const key = `${session.id}:t${tail.turn}`
     if (closed.has(key)) return
+    // The dead process may have seen events the log never got (DSH dispatches before it
+    // persists): skip what it already emitted, and the whole turn if it in fact ended.
+    const emitted = this.options.emittedSpans?.lookup(key)
+    if (emitted?.ended) {
+      closed.add(key)
+      this.options.log('debug', `crashed turn ${key} had ended before the crash; nothing to close`)
+      return
+    }
     const closerSeq = events[tail.closerStart]!.seq
     let capture = false
     const spans: SpanRecord[] = []
     const replay = new SessionTracer(
       { sessionId: session.id, header: session.header, inheritedEventCount: Number(session.inheritedEventCount ?? 0) },
       { ...this.options.builder, source: 'live' },
-      (span) => { if (capture) spans.push(span) },
+      (span) => { if (capture && !emitted?.spanIds.has(span.spanId)) spans.push(span) },
       this.resolveTurn,
       this.resolveName,
       this.resolveRoot,

@@ -34,8 +34,12 @@ const option = (name: string, fallback: string) => {
 
 const profile = option('--profile', 'headless')
 const compaction = flag('--compaction')
+const nested = flag('--nested')
 const COMPACTION_FILES = 14
-const task = compaction
+const task = nested
+  ? 'Delegate to a subagent this exact task: "Delegate to a subagent of your own the task: Reply with the word nested-ok. ' +
+    'Wait for its result with wait_agent and reply with it." Wait for your subagent with wait_agent, then answer with its reply.'
+  : compaction
   ? `Read the files part-01.txt through part-${String(COMPACTION_FILES).padStart(2, '0')}.txt in the current directory one at a time with your read tool, ` +
     'one read per step, in order, never several in parallel. After the last one, answer with the number of files you read.'
   : option('--task',
@@ -72,6 +76,12 @@ const launch = dshBin
 const dshArgs = [...launch, '--profile', profile]
 if (!flag('--no-plugin')) dshArgs.push('--patch', patchFile)
 if (flag('--ptc')) dshArgs.push('--patch', path.join(dsh, 'apps/cli/config/examples/ptc.yml'))
+if (nested) {
+  // DSH allows one delegation level by default; customers raise it the same way.
+  const nestedPatch = path.join(work, 'nested.patch.yml')
+  writeFileSync(nestedPatch, '- id: subagent\n  config:\n    maxDepth: 2\n')
+  dshArgs.push('--patch', nestedPatch)
+}
 if (compaction) {
   // deepseek-flash has a 1M-token window: 2% (~21k tokens) is reached after a dozen reads
   // of ~5k chars (DSH's tool-result pruner caps each result at ~5k chars).
@@ -128,6 +138,21 @@ const compactionCheck: ExtraCheck = (spans: StoredSpan[]) => {
     && resets.length > 0 && resets.every((s) => s.attribute['gen_ai.input.messages'] !== undefined)
     && after.every((s) => s.attribute['gen_ai.input.messages_delta'] !== undefined || s.attribute['agent.custom.input_delta_reset'] !== undefined)
 }
-const verified = code === 0 && await verifyRun(secrets, runId, started, outboxOf(path.join(work, 'home')), compaction ? compactionCheck : undefined, compaction ? 3 : 2)
+/** Two delegation levels, all in the task's session; turn ids keep each agent apart. */
+const nestedCheck: ExtraCheck = (spans: StoredSpan[]) => {
+  const agents = spans.filter((s) => s.attribute['gen_ai.span.kind'] === 'agent')
+  const byId = new Map(spans.map((s) => [s.spanID, s]))
+  const depthOf = (s: StoredSpan): number => {
+    let d = 0
+    for (let p = byId.get(s.parentSpanID ?? ""); p; p = byId.get(p.parentSpanID ?? "")) if (p.attribute['gen_ai.span.kind'] === 'agent') d++
+    return d
+  }
+  console.log('\n== nested ==')
+  for (const a of agents) console.log(`  depth ${depthOf(a)} ${a.name} op=${String(a.attribute['gen_ai.operation.name'])} session=${String(a.attribute['gen_ai.session.id']).slice(-8)} turn=${String(a.attribute['gen_ai.turn.id']).split(':').slice(1).join(':')} dsh=${String(a.attribute['agent.custom.dsh_session_id'] ?? a.attribute['gen_ai.agent.id']).slice(-8)}`)
+  const sessions = new Set(spans.map((s) => String(s.attribute['gen_ai.session.id'])))
+  const turnIds = new Set(agents.map((a) => String(a.attribute['gen_ai.turn.id'])))
+  return sessions.size === 1 && agents.some((a) => depthOf(a) === 2) && turnIds.size === agents.length
+}
+const verified = code === 0 && await verifyRun(secrets, runId, started, outboxOf(path.join(work, 'home')), compaction ? compactionCheck : nested ? nestedCheck : undefined, compaction || nested ? 3 : 2)
 console.log(verified ? 'E2E PASS' : 'E2E FAIL')
 process.exit(verified ? 0 : 1)

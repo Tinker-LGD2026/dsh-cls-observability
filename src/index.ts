@@ -17,10 +17,10 @@ import { Collector, commonAttributes, type ContextLike } from './collector.ts'
 import { processEnvReader, resolveConfig, type EnvReader, type EnvSource } from './config.ts'
 import { DELIVER_FLAG, deliverOutbox, spawnDeliverer } from './deliver.ts'
 import { encodeGzipBody, exportGzipBody, type ExporterConfig } from './exporter.ts'
-import { ClosedTurnsFile } from './crash-closure.ts'
+import { ClosedTurnsFile, OpenSpansLedger } from './crash-closure.ts'
 import { Journal } from './journal.ts'
 import { limitSpanSize } from './size-limit.ts'
-import { Outbox } from './outbox.ts'
+import { alive, Outbox } from './outbox.ts'
 import { ExportQueue } from './queue.ts'
 import type { Attributes } from './otlp/types.ts'
 
@@ -125,8 +125,11 @@ export function apply(ctx: PluginContext): void {
     log,
   })
 
+  // Turns this process has open: lets crash closure in a later process skip what was already sent.
+  const openSpans = outboxUsable ? new OpenSpansLedger(outbox.dir) : undefined
+  openSpans?.foldDead(alive)
   const collector = new Collector({
-    ...(outboxUsable ? { closedTurns: new ClosedTurnsFile(outbox.dir) } : {}),
+    ...(outboxUsable ? { closedTurns: new ClosedTurnsFile(outbox.dir), emittedSpans: openSpans! } : {}),
     builder: {
       captureContent: config.captureContent,
       maxContentChars: config.maxContentChars,
@@ -139,6 +142,7 @@ export function apply(ctx: PluginContext): void {
       if (config.debug) log('debug', `span ${String(span.attributes['gen_ai.span.kind'])} ${span.name}`)
       // CLS stores at most 8 MB per log: shrink captured content of an oversized span.
       if (config.captureContent && limitSpanSize(span)) log('debug', `span ${span.name} exceeded the CLS per-log limit; content shortened`)
+      openSpans?.record(span)
       // No immediate send at turn end: a one-shot host disposes milliseconds later, and a
       // request caught in flight at exit is the only source of duplicates. The regular
       // eager send covers long-lived hosts; at exit the batch is spilled and handed to the
@@ -169,6 +173,7 @@ export function apply(ctx: PluginContext): void {
         log('debug', spawned ? 'spilled pending spans; started detached deliverer' : 'spilled pending spans; deliverer unavailable, kept in outbox')
         return spawned
       }
+      openSpans?.close()
       await queue.stop(config.shutdownTimeoutMs, onSpill)
       const s = queue.stats
       log('debug', `stopped: enqueued=${s.enqueued} exported=${s.exported} spilled=${s.spilled} recovered=${s.recovered} dropped=${s.dropped} rejected=${s.rejected} retried=${s.retried}`)

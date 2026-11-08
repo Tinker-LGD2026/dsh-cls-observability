@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
+import { OpenSpansLedger } from '../src/crash-closure.ts'
 import { Journal, readJournal, recoverJournals } from '../src/journal.ts'
 import { Outbox } from '../src/outbox.ts'
 import { ExportQueue } from '../src/queue.ts'
@@ -161,5 +162,45 @@ describe('queue with a journal', () => {
     const [file] = files(dir, '.wal')
     expect(file).toMatch(/\.wal$/)
     expect(readJournal(readFileSync(path.join(dir, file!), 'utf8')).spans).toHaveLength(3)
+  })
+})
+
+describe('open spans ledger', () => {
+  const tool = (agent: string, turn: number, id: string, kind = 'tool') => ({ spanId: id, attributes: { 'gen_ai.span.kind': kind, 'gen_ai.agent.id': agent, 'gen_ai.turn.id': `root:${agent}:t${turn}` } })
+
+  it('lets a later process see what a dead one emitted for its open turns, and which turns ended', () => {
+    const dir = tempDir()
+    const live = new OpenSpansLedger(dir)
+    live.record(tool('S', 1, 'a1', 'step'))
+    live.record(tool('S', 1, 'a2'))
+    live.record(tool('S', 1, 'x', 'agent')) // turn 1 ended
+    live.record(tool('S', 2, 'b1', 'step'))
+    live.record(tool('S', 2, 'b2'))
+    // The process dies without close(): pretend its pid is gone.
+    const [own] = readdirSync(dir).filter((f) => f.startsWith('open-spans-'))
+    renameSync(path.join(dir, own!), path.join(dir, 'open-spans-999999999'))
+    const next = new OpenSpansLedger(dir)
+    expect(next.lookup('S:t2')).toEqual({ spanIds: new Set(['b1', 'b2']), ended: false })
+    next.foldDead(() => false)
+    expect(readdirSync(dir).filter((f) => f.startsWith('open-spans-'))).toEqual([])
+    expect(next.lookup('S:t2')).toEqual({ spanIds: new Set(['b1', 'b2']), ended: false })
+    expect(next.lookup('S:t1').ended).toBe(true)
+    expect(next.lookup('S:t9')).toEqual({ spanIds: new Set(), ended: false })
+  })
+
+  it('removes its file on a clean shutdown with no open turn, keeps open turns otherwise', () => {
+    const a = tempDir()
+    const done = new OpenSpansLedger(a)
+    done.record(tool('S', 1, 's', 'step'))
+    done.record(tool('S', 1, 'x', 'agent'))
+    done.close()
+    expect(readdirSync(a)).toEqual([])
+    const b = tempDir()
+    const open = new OpenSpansLedger(b)
+    open.record(tool('S', 1, 's', 'step'))
+    open.record(tool('S', 2, 't', 'step'))
+    open.record(tool('S', 1, 'x', 'agent'))
+    open.close()
+    expect(readFileSync(path.join(b, readdirSync(b)[0]!), 'utf8')).toBe('+ S:t2 t\n')
   })
 })
