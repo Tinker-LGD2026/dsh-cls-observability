@@ -72,7 +72,12 @@ export async function verifyRun(secrets: DevSecrets, runId: string, startedMs: n
   for (const i of specIssues.slice(0, 15)) console.log(`  ${i.span}: ${i.problem}`)
   const leftover = existsSync(outboxDir) ? readdirSync(outboxDir) : []
   console.log(`outbox leftover files: ${leftover.length}`)
-  const ok = ['entry', 'agent', 'step', 'chat', 'tool'].every((k) => kinds.has(k)) && orphans.length === 0 && leftover.length === 0 && contentOk && specIssues.length === 0
+  // One task = one session: a subagent's spans carry the session of the task that spawned it.
+  const sessionsPerTrace = new Map<string, Set<string>>()
+  for (const s of spans) sessionsPerTrace.set(s.traceID, (sessionsPerTrace.get(s.traceID) ?? new Set()).add(String(s.attribute['gen_ai.session.id'])))
+  const oneSession = [...sessionsPerTrace.values()].every((v) => v.size === 1)
+  console.log(`session.id per trace: ${oneSession ? 'single' : 'MIXED'}`)
+  const ok = ['entry', 'agent', 'step', 'chat', 'tool'].every((k) => kinds.has(k)) && orphans.length === 0 && leftover.length === 0 && contentOk && specIssues.length === 0 && oneSession
   console.log(ok ? 'CLS VERIFY PASS' : 'CLS VERIFY FAIL')
   return ok
 }

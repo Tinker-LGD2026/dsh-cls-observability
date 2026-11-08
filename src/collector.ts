@@ -101,6 +101,9 @@ export class Collector {
   private resolveTurn = (sessionId: string, atMs: number, requireEnded: boolean): TurnRef | undefined =>
     (this.tracers.get(sessionId) ?? this.retired.get(sessionId))?.turnAt(atMs, requireEnded)
 
+  private resolveRoot = (sessionId: string): string | undefined =>
+    (this.tracers.get(sessionId) ?? this.retired.get(sessionId))?.rootSessionId()
+
   private resolveName = (parentSessionId: string, childSessionId: string): string | undefined =>
     (this.tracers.get(parentSessionId) ?? this.retired.get(parentSessionId))?.childName(childSessionId)
 
@@ -115,6 +118,7 @@ export class Collector {
       this.options.emit,
       this.resolveTurn,
       this.resolveName,
+      this.resolveRoot,
     )
     this.tracers.set(session.id, tracer)
     this.seed(tracer, session, beforeSeq)
@@ -163,6 +167,7 @@ export class Collector {
       (span) => { if (capture) spans.push(span) },
       this.resolveTurn,
       this.resolveName,
+      this.resolveRoot,
     )
     replay.seedHistory(events.slice(0, tail.regionStart))
     for (const event of events.slice(tail.regionStart)) {

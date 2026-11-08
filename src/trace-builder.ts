@@ -88,6 +88,9 @@ export type TurnResolver = (sessionId: string, atMs: number, requireEnded: boole
 /** Resolves a subagent's name from its parent's `subagent/catalog` (parentSessionId, childSessionId). */
 export type NameResolver = (parentSessionId: string, childSessionId: string) => string | undefined
 
+/** Resolves the task (root session) a known session belongs to; undefined when unknown. */
+export type RootResolver = (sessionId: string) => string | undefined
+
 interface SurfaceNode {
   seq: number
   /** Counts as a conversation message in chat input (not system / developer, not empty). */
@@ -227,6 +230,14 @@ function recentFrom(messages: readonly Message[], budget: number): number {
   return from
 }
 
+/** Short, stable key of a subagent's own DSH session id (its last id segment). */
+export function childKey(sessionId: string): string {
+  const tail = sessionId.slice(sessionId.lastIndexOf('-') + 1)
+  const key = /^[A-Za-z0-9]{8,}$/.test(tail) ? tail : sessionId
+  // Never a ':' inside: it separates the id levels.
+  return key.replace(/[^A-Za-z0-9_-]/g, '_')
+}
+
 /** Normalize a provider route (e.g. `deepseek-official`) to a GenAI system name. */
 export function systemName(provider: string | undefined): string | undefined {
   if (!provider) return undefined
@@ -271,6 +282,8 @@ export class SessionTracer {
   private readonly emit: (span: SpanRecord) => void
   private readonly resolveTurn?: TurnResolver
   private readonly resolveName?: NameResolver
+  private readonly resolveRoot?: RootResolver
+  private rootCache?: string
 
   constructor(
     meta: { sessionId: string; header: SessionHeader; inheritedEventCount: number },
@@ -278,11 +291,13 @@ export class SessionTracer {
     emit: (span: SpanRecord) => void,
     resolveTurn?: TurnResolver,
     resolveName?: NameResolver,
+    resolveRoot?: RootResolver,
   ) {
     this.options = options
     this.emit = emit
     if (resolveTurn) this.resolveTurn = resolveTurn
     if (resolveName) this.resolveName = resolveName
+    if (resolveRoot) this.resolveRoot = resolveRoot
     this.sessionId = meta.sessionId
     this.header = meta.header
     this.skipBeforeSeq = meta.inheritedEventCount
@@ -539,7 +554,8 @@ export class SessionTracer {
       traceId: state.traceId,
       spanId: state.agentId,
       parentSpanId: state.toolParentId ?? state.entryId,
-      name: `${subagent ? 'invoke_subagent' : 'invoke_agent'} ${this.agentName()}`,
+      // Span name is `invoke_agent {name}` for every agent (spec); subagents differ by operation and scope.
+      name: `invoke_agent ${this.agentName()}`,
       kind: SpanKind.Internal,
       startNs: ns(state.startMs),
       endNs: ns(event.time),
@@ -1264,15 +1280,46 @@ export class SessionTracer {
     return this.header.agentPreset ?? 'main'
   }
 
+  /**
+   * The task this session belongs to. A DSH subagent runs in a session of its own, but
+   * for observability it is part of the task that spawned it: subagent spans carry the
+   * root session's `gen_ai.session.id`, so session analysis and cost cover the whole task.
+   * Nested subagents resolve through their parent; unknown parents fall back to the
+   * direct parent id.
+   */
+  rootSessionId(): string {
+    if (this.rootCache) return this.rootCache
+    if (this.header.origin !== 'subagent' || !this.header.parentSession) return (this.rootCache = this.sessionId)
+    const parent = this.header.parentSession
+    const root = this.resolveRoot?.(parent)
+    if (root) this.rootCache = root
+    return root ?? parent
+  }
+
+  /**
+   * `gen_ai.session.id` / `turn.id` / `step.id`. A subagent shares its task's session id;
+   * its turns get their own segment (the tail of its DSH session id) so they never collide
+   * with the parent's turn and step numbers, and stay deterministic for replay:
+   * `<task>:<child>:t<N>:s<M>`. The prefix chain session → turn → step still holds.
+   */
+  private ids(turn: number, step?: number): Attributes {
+    const root = this.rootSessionId()
+    const turnId = root === this.sessionId ? `${root}:t${turn}` : `${root}:${childKey(this.sessionId)}:t${turn}`
+    return {
+      'gen_ai.session.id': root,
+      'gen_ai.turn.id': turnId,
+      ...(step !== undefined ? { 'gen_ai.step.id': `${turnId}:s${step}` } : {}),
+      ...(root !== this.sessionId ? { 'agent.custom.dsh_session_id': this.sessionId } : {}),
+    }
+  }
+
   private common(turn: number, step?: number): Attributes {
     const system = systemName(this.config?.provider)
     return {
       ...this.options.commonAttributes,
       'gen_ai.agent.name': this.agentName(),
       'gen_ai.agent.id': this.sessionId,
-      'gen_ai.session.id': this.sessionId,
-      'gen_ai.turn.id': `${this.sessionId}:t${turn}`,
-      ...(step !== undefined ? { 'gen_ai.step.id': `${this.sessionId}:t${turn}:s${step}` } : {}),
+      ...this.ids(turn, step),
       ...(system ? { 'gen_ai.system': system } : {}),
       ...(this.header.cwd ? { 'workspace.current_root': this.header.cwd } : {}),
       ...(this.header.origin === 'subagent' ? { 'gen_ai.agent.scope': 'subagent' } : {}),

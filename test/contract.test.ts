@@ -51,7 +51,9 @@ describe.skipIf(logs.length === 0)('DSH session fixtures', () => {
         ids.add(s.spanId)
         expect(s.endNs >= s.startNs).toBe(true)
         expect(['entry', 'agent', 'step', 'chat', 'tool']).toContain(kindOf(s))
-        expect(s.attributes['gen_ai.session.id']).toBe(log.header.id)
+        // A subagent reports its task's session (here its parent: replayed alone); agent.id is its own session.
+        expect(s.attributes['gen_ai.session.id']).toBe(log.header.origin === 'subagent' && log.header.parentSession ? log.header.parentSession : log.header.id)
+        expect(s.attributes['gen_ai.agent.id']).toBe(log.header.id)
         const fr = s.attributes['gen_ai.response.finish_reasons']
         if (fr !== undefined) expect(Array.isArray(fr)).toBe(true)
         // content capture is off: no message bodies leak
@@ -121,7 +123,7 @@ describe.skipIf(logs.length === 0)('CLS spec naming and content (capture on)', (
             if (log.header.origin === 'subagent') {
               subagentAgents++
               expect(a['gen_ai.operation.name']).toBe('invoke_subagent')
-              expect(s.name.startsWith('invoke_subagent ')).toBe(true)
+              expect(s.name.startsWith('invoke_agent ')).toBe(true)
             } else {
               expect(a['gen_ai.operation.name']).toBe('invoke_agent')
             }
@@ -198,7 +200,15 @@ describe.skipIf(logs.length === 0)('chat input deltas and subagent names (groupe
           if (!catalog) continue
           named++
           expect(s.attributes['gen_ai.agent.name']).toBe(catalog.data.name)
-          expect(s.name).toBe(`invoke_subagent ${String(catalog.data.name)}`)
+          expect(s.name).toBe(`invoke_agent ${String(catalog.data.name)}`)
+        }
+        // Every span of the subagent belongs to the task that spawned it.
+        const roots = sessionLogs.filter((l) => l.header.origin !== 'subagent').map((l) => l.header.id)
+        for (const s of results[i]!) {
+          if (!parent) continue
+          const sid = String(s.attributes['gen_ai.session.id'])
+          expect(roots.includes(sid) || sid === log.header.parentSession).toBe(true)
+          expect(String(s.attributes['gen_ai.turn.id'])).toMatch(new RegExp(`^${sid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:[A-Za-z0-9_-]+:t\\d+$`))
         }
       })
     }

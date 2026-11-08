@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import * as zlib from 'node:zlib'
 import type { SessionEvent, SessionHeader } from './dsh-types.ts'
 import type { SpanRecord } from './otlp/types.ts'
-import { SessionTracer, type BuilderOptions, type NameResolver } from './trace-builder.ts'
+import { SessionTracer, type BuilderOptions, type NameResolver, type RootResolver } from './trace-builder.ts'
 
 export interface SessionLog {
   header: SessionHeader
@@ -70,7 +70,7 @@ export function readSessionLog(file: string): SessionLog {
   return parseSessionLog(decompress(readFileSync(file), file))
 }
 
-export function replaySession(log: SessionLog, options: Omit<BuilderOptions, 'source'>, resolveName?: NameResolver): SpanRecord[] {
+export function replaySession(log: SessionLog, options: Omit<BuilderOptions, 'source'>, resolveName?: NameResolver, resolveRoot?: RootResolver): SpanRecord[] {
   const spans: SpanRecord[] = []
   const tracer = new SessionTracer(
     { sessionId: log.header.id, header: log.header, inheritedEventCount: log.inheritedEventCount },
@@ -78,6 +78,7 @@ export function replaySession(log: SessionLog, options: Omit<BuilderOptions, 'so
     (span) => spans.push(span),
     undefined,
     resolveName,
+    resolveRoot,
   )
   for (const event of log.events) tracer.onEvent(event)
   return spans
@@ -96,8 +97,26 @@ export function catalogNames(logs: readonly SessionLog[]): NameResolver {
   return (parent, child) => names.get(`${parent}|${child}`)
 }
 
-/** Replay related sessions together (parents resolve their subagents' names). */
+/** Root session (task) of each log, following subagent parents present in the group. */
+export function taskRoots(logs: readonly SessionLog[]): RootResolver {
+  const parent = new Map<string, string | undefined>()
+  for (const log of logs) parent.set(log.header.id, log.header.origin === 'subagent' ? log.header.parentSession : undefined)
+  return (id) => {
+    if (!parent.has(id)) return undefined
+    let current = id
+    for (let hops = 0; hops < 64; hops++) {
+      const up = parent.get(current)
+      if (!up) return current
+      if (!parent.has(up)) return up
+      current = up
+    }
+    return current
+  }
+}
+
+/** Replay related sessions together (parents resolve their subagents' names and task). */
 export function replaySessionGroup(logs: readonly SessionLog[], options: Omit<BuilderOptions, 'source'>): SpanRecord[][] {
   const resolve = catalogNames(logs)
-  return logs.map((log) => replaySession(log, options, resolve))
+  const roots = taskRoots(logs)
+  return logs.map((log) => replaySession(log, options, resolve, roots))
 }

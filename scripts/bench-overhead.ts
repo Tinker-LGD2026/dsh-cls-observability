@@ -10,6 +10,7 @@
 import { Collector } from '../src/collector.ts'
 import type { SessionEvent, SessionLike } from '../src/dsh-types.ts'
 import { BUILTIN_RULES, Redactor } from '../src/redact.ts'
+import { limitSpanSize } from '../src/size-limit.ts'
 
 const sessions = Number(process.argv[2] ?? 20)
 const turns = Number(process.argv[3] ?? 50)
@@ -29,7 +30,8 @@ new Collector({
   builder: { captureContent: true, maxContentChars: 32_000, commonAttributes: {}, redactor: new Redactor(BUILTIN_RULES) },
   includeAuxiliary: true,
   sampleRatio: 1,
-  emit: () => { exported++ },
+  // Same per-span work as the plugin entry: size guard before queueing.
+  emit: (span) => { limitSpanSize(span); exported++ },
   log: () => {},
 }).attach(ctx as never)
 

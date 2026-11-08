@@ -19,6 +19,7 @@ import { DELIVER_FLAG, deliverOutbox, spawnDeliverer } from './deliver.ts'
 import { encodeGzipBody, exportGzipBody, type ExporterConfig } from './exporter.ts'
 import { ClosedTurnsFile } from './crash-closure.ts'
 import { Journal } from './journal.ts'
+import { limitSpanSize } from './size-limit.ts'
 import { Outbox } from './outbox.ts'
 import { ExportQueue } from './queue.ts'
 import type { Attributes } from './otlp/types.ts'
@@ -136,6 +137,8 @@ export function apply(ctx: PluginContext): void {
     sampleRatio: config.sampleRatio,
     emit: (span) => {
       if (config.debug) log('debug', `span ${String(span.attributes['gen_ai.span.kind'])} ${span.name}`)
+      // CLS stores at most 8 MB per log: shrink captured content of an oversized span.
+      if (config.captureContent && limitSpanSize(span)) log('debug', `span ${span.name} exceeded the CLS per-log limit; content shortened`)
       // No immediate send at turn end: a one-shot host disposes milliseconds later, and a
       // request caught in flight at exit is the only source of duplicates. The regular
       // eager send covers long-lived hosts; at exit the batch is spilled and handed to the

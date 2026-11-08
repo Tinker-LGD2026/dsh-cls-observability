@@ -30,9 +30,8 @@ export interface ValidateOptions {
   /** All spans of each trace are present: check parents and the single entry root. */
   complete?: boolean
   /**
-   * Spans read back from CLS. Tolerates what the CLS ingest pipeline itself adds or
-   * rewrites: derived `gen_ai.usage.details` / `gen_ai.request.parameters`, and a
-   * subagent's `invoke_subagent` name prefix stored as `invoke_agent`.
+   * Spans read back from CLS. Tolerates what the CLS ingest pipeline itself adds:
+   * derived `gen_ai.usage.details` / `gen_ai.request.parameters`.
    */
   stored?: boolean
 }
@@ -121,7 +120,9 @@ export function validateSpans(spans: readonly CheckedSpan[], options: ValidateOp
     // Ids: <session>:t<N>, <turn>:s<N>.
     const session = String(a['gen_ai.session.id'] ?? '')
     const turn = String(a['gen_ai.turn.id'] ?? '')
-    if (!new RegExp(`^${escape(session)}:t\\d+$`).test(turn)) add(`turn.id "${turn}" is not <session-id>:t<N>`)
+    // A subagent's turns carry its own segment inside the task's session: <session>:<child>:t<N>.
+    const turnPattern = a['gen_ai.agent.scope'] === 'subagent' ? `^${escape(session)}(:[A-Za-z0-9_-]+)?:t\\d+$` : `^${escape(session)}:t\\d+$`
+    if (!new RegExp(turnPattern).test(turn)) add(`turn.id "${turn}" is not <session-id>:t<N>`)
     if (a['gen_ai.step.id'] !== undefined && !new RegExp(`^${escape(turn)}:s\\d+$`).test(String(a['gen_ai.step.id']))) {
       add(`step.id "${String(a['gen_ai.step.id'])}" is not <turn-id>:s<N>`)
     }
@@ -138,9 +139,8 @@ export function validateSpans(spans: readonly CheckedSpan[], options: ValidateOp
         if (s.parentSpanId) add('entry is a trace root and must have no parent')
         break
       case 'agent':
-        if (s.name !== `${op} ${String(a['gen_ai.agent.name'])}` && !(options.stored && s.name === `invoke_agent ${String(a['gen_ai.agent.name'])}`)) {
-          add(`name is not "${op} <agent.name>"`)
-        }
+        // Every agent span is named `invoke_agent {agentName}`; a subagent differs by operation and scope.
+        if (s.name !== `invoke_agent ${String(a['gen_ai.agent.name'])}`) add('name is not "invoke_agent <agent.name>"')
         if (subagent && op !== 'invoke_subagent') add('a subagent must use invoke_subagent')
         break
       case 'step':

@@ -112,13 +112,13 @@ describe('Collector (live)', () => {
 
     const parentTool = spans.find((x) => kind(x) === 'tool')!
     // Nested in the parent's trace: no entry, the agent span hangs off the tool span.
-    expect(spans.some((x) => kind(x) === 'entry' && x.attributes['gen_ai.session.id'] === 'C')).toBe(false)
-    const childAgent = spans.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.session.id'] === 'C')!
+    expect(spans.some((x) => kind(x) === 'entry' && x.attributes['gen_ai.agent.id'] === 'C')).toBe(false)
+    const childAgent = spans.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.agent.id'] === 'C')!
     expect(childAgent.traceId).toBe(parentTool.traceId)
     expect(childAgent.parentSpanId).toBe(parentTool.spanId)
     expect(childAgent.attributes['gen_ai.agent.scope']).toBe('subagent')
     expect(childAgent.attributes['gen_ai.subagent.parent_tool_call.id']).toBe('sub1')
-    const resumedEntry = spans.find((x) => kind(x) === 'entry' && x.attributes['gen_ai.session.id'] === 'R')!
+    const resumedEntry = spans.find((x) => kind(x) === 'entry' && x.attributes['gen_ai.agent.id'] === 'R')!
     expect(resumedEntry.parentSpanId).toBeUndefined()
     expect(resumedEntry.attributes['gen_ai.subagent.parent_tool_call.id']).toBeUndefined()
   })
@@ -337,11 +337,15 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
       return {}
     })
     turn(ctx, child.append, 1, 'go', 'done')
-    const agent = spans.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.session.id'] === 'C2')!
-    expect(agent.name).toBe('invoke_subagent researcher')
+    const agent = spans.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.agent.id'] === 'C2')!
+    expect(agent.name).toBe('invoke_agent researcher')
+    // Part of the parent's task: same session id, own turn segment, own DSH session kept.
+    expect(agent.attributes['gen_ai.session.id']).toBe('P2')
+    expect(agent.attributes['gen_ai.turn.id']).toBe('P2:C2:t1')
+    expect(agent.attributes['agent.custom.dsh_session_id']).toBe('C2')
     expect(agent.attributes['gen_ai.agent.name']).toBe('researcher')
     expect(agent.attributes['gen_ai.operation.name']).toBe('invoke_subagent')
-    expect(chats(spans).find((x) => x.attributes['gen_ai.session.id'] === 'C2')!.attributes['gen_ai.agent.name']).toBe('researcher')
+    expect(chats(spans).find((x) => x.attributes['gen_ai.agent.id'] === 'C2')!.attributes['gen_ai.agent.name']).toBe('researcher')
   })
 
   it('keeps an entry root for a later subagent turn in its own trace', async () => {
@@ -358,11 +362,11 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
     })
     turn(ctx, child.append, 1, 'first', 'a1')
     turn(ctx, child.append, 2, 'second', 'a2')
-    const mine = spans.filter((x) => x.attributes['gen_ai.session.id'] === 'C3')
-    expect(mine.filter((x) => kind(x) === 'entry').map((x) => x.attributes['gen_ai.turn.id'])).toEqual(['C3:t2'])
+    const mine = spans.filter((x) => x.attributes['gen_ai.agent.id'] === 'C3')
+    expect(mine.filter((x) => kind(x) === 'entry').map((x) => x.attributes['gen_ai.turn.id'])).toEqual(['P3:C3:t2'])
     const entry = mine.find((x) => kind(x) === 'entry')!
     expect(entry.parentSpanId).toBeUndefined()
-    expect(mine.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.turn.id'] === 'C3:t2')!.parentSpanId).toBe(entry.spanId)
+    expect(mine.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.turn.id'] === 'P3:C3:t2')!.parentSpanId).toBe(entry.spanId)
   })
 
   it('records the prompt and reply of an auxiliary call without touching the stream', async () => {

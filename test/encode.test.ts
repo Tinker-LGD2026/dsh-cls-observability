@@ -10,7 +10,7 @@ describe('encodeExportRequest', () => {
   it('round-trips through the official OTLP schema', () => {
     const bytes = encodeExportRequest({
       resource: { 'service.name': 'deepseek-harness', 'process.pid': 42 },
-      scope: { name: 'agentobs-dsh', version: '0.1.0' },
+      scope: { name: 'dsh-cls-observability', version: '0.1.0' },
       spans: [{
         traceId,
         spanId,
@@ -39,7 +39,7 @@ describe('encodeExportRequest', () => {
     const rs = decoded.resource_spans[0]
     expect(kvToObject(rs.resource.attributes)).toEqual({ 'service.name': 'deepseek-harness', 'process.pid': 42 })
     const ss = rs.scope_spans[0]
-    expect(ss.scope).toEqual({ name: 'agentobs-dsh', version: '0.1.0' })
+    expect(ss.scope).toEqual({ name: 'dsh-cls-observability', version: '0.1.0' })
     const span = ss.spans[0]
     expect(Buffer.from(span.trace_id, 'base64').toString('hex')).toBe(traceId)
     expect(Buffer.from(span.span_id, 'base64').toString('hex')).toBe(spanId)
