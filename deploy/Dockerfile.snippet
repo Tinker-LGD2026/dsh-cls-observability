@@ -1,15 +1,19 @@
 # Add the plugin to an image that already contains DeepSeek Harness (`dsh` on PATH).
 # Build-time only: no credentials in the image; they come from the runtime environment.
 #
-#   docker build --build-arg AGENTOBS_VERSION=0.1.0 -f Dockerfile.snippet .
+#   docker build --build-arg AGENTOBS_VERSION=0.1.0 --build-arg AGENTOBS_SHA256=<published sha256> -f Dockerfile.snippet .
+#
+# Without registry access: `COPY dsh-cls-observability-0.1.0.tgz /tmp/` before the RUN below
+# and pass --build-arg AGENTOBS_PACKAGE=/tmp/dsh-cls-observability-0.1.0.tgz.
 
 ARG AGENTOBS_VERSION=0.1.0
 ARG AGENTOBS_SHA256=
+ARG AGENTOBS_PACKAGE=dsh-cls-observability@${AGENTOBS_VERSION}
 
 # Plugin file, verified against the published checksum when one is given.
 RUN mkdir -p /opt/dsh-cls-observability \
  && cd /opt/dsh-cls-observability \
- && npm pack "dsh-cls-observability@${AGENTOBS_VERSION}" --silent \
+ && npm pack "$AGENTOBS_PACKAGE" --silent \
  && tar -xzf "dsh-cls-observability-${AGENTOBS_VERSION}.tgz" --strip-components=2 package/dist/dsh-cls-observability.mjs \
  && rm -f ./*.tgz \
  && if [ -n "$AGENTOBS_SHA256" ]; then echo "$AGENTOBS_SHA256  dsh-cls-observability.mjs" | sha256sum -c -; fi

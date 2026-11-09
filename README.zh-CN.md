@@ -55,13 +55,23 @@
 
 ### 由程序拉起（TypeScript SDK）
 
+把第 1 步的 patch 内容单独存成一个文件，例如 `/opt/dsh-cls-observability/agentobs.patch.yml`，在每次拉起时传入（用 home patch 也可以）：
+
 ```ts
+import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
+
 const harness = new DeepSeekHarness({
   patches: ['/opt/dsh-cls-observability/agentobs.patch.yml'],
   // SDK 的 env 会整体替换子进程环境，需要保留 process.env。
   env: { ...process.env, CLS_AGENTOBS_ENABLED: 'true', CLS_AGENTOBS_REGION: 'ap-shanghai', CLS_AGENTOBS_TOPIC_ID: '…' },
 })
 ```
+
+### 注意事项
+
+- **`--patch` 要放在应用参数之前。** `dsh` 启动器从第一个它不认识的参数开始，后面的全部交给 profile：`dsh --profile headless --patch p.yml --json "任务"` 会加载插件，`dsh --profile headless --json --patch p.yml "任务"` 不会。
+- **子 Agent 嵌套。** DSH 默认只允许 1 层委派。要让子 Agent 再派子 Agent，在 patch 里调高：`- id: subagent` / `config: { maxDepth: 2 }`。每一层都归到发起任务的那个会话里。
+- **子 Agent 的名字。** DSH 0.2.2-rc.1 不记录子 Agent 的名字，只有模型派发任务时写的描述。开启内容采集时，用这段描述（脱敏后，最长 80 字）作为 Agent 名；关闭内容采集时，名字为 `subagent`。之后的 DSH 版本会记录 `agent-1` 这样的名字，按原样使用。
 
 ## 容器部署
 
@@ -93,7 +103,7 @@ const harness = new DeepSeekHarness({
 | `CLS_AGENTOBS_REGION` / `CLS_AGENTOBS_TOPIC_ID` | – | 地域与 Trace 主题 |
 | `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` | – | 密钥；也可用 `CLS_AGENTOBS_CREDENTIALS_FILE` 指定凭证文件（变更后自动重读） |
 | `CLS_AGENTOBS_NETWORK` | 公网 | `internal` 使用内网域名 |
-| `CLS_AGENTOBS_ENDPOINT` | – | 改为发往其他 OTLP/HTTP 端点（Collector、转发进程） |
+| `CLS_AGENTOBS_ENDPOINT` | – | 改为发往其他 OTLP/HTTP 端点（Collector、转发进程）；明文 http 发往非本机地址时不携带凭证 |
 | `CLS_AGENTOBS_CAPTURE_CONTENT` | `truncate` | 消息与工具内容：`truncate`（单字段截断到 `CLS_AGENTOBS_CONTENT_MAX_CHARS`，默认 32000）/ `full` / `off` |
 | `CLS_AGENTOBS_JOURNAL` | `true` | 发送前先写磁盘日志（进程崩溃不丢）；`false` 仅保存在内存 |
 | `CLS_AGENTOBS_REDACT` | `on` | 上报前对内容做密钥脱敏（见下文）；`off` 关闭 |
@@ -101,6 +111,8 @@ const harness = new DeepSeekHarness({
 | `CLS_AGENTOBS_INCLUDE_AUXILIARY` | `true` | 记录压缩、会话标题等辅助模型调用，保证 Token 与成本统计完整；设为 `false` 不采集 |
 | `CLS_AGENTOBS_SAMPLE_RATIO` | `1` | 按会话采样 |
 | `CLS_AGENTOBS_CUSTOM_ATTRIBUTES` | – | `k=v,k2=v2`，作为 `agent.custom.k` 附在每个 Span 上 |
+| `CLS_AGENTOBS_DATA_DIR` | `$DSH_HOME/agentobs/outbox` | outbox 目录；须为绝对路径、属于运行 DSH 的用户（符号链接或他人的目录会被拒绝） |
+| `CLS_AGENTOBS_MAX_QUEUE_SPANS` / `CLS_AGENTOBS_MAX_QUEUE_MB` | `20000` / `256` | 内存队列上限（条数 / 估算大小），超出时最旧的 Span 转存到 outbox |
 | `CLS_AGENTOBS_DEBUG` | `false` | stderr 诊断日志 |
 
 `gen_ai.entry.type` 取自 DSH profile：`headless` → `cli`、`web` → `web`、`desktop` → `desktop`、`sdk` / `sdk-minimal` → `sdk`、`acp` → `acp`，自定义 profile 取其名称。profile 名同时记录在 `agent.custom.dsh_profile`。可用 `CLS_AGENTOBS_ENTRY_TYPE` / `CLS_AGENTOBS_ENTRY_PLATFORM` 覆盖。
@@ -110,10 +122,12 @@ const harness = new DeepSeekHarness({
 | Span | 名称 | 说明 |
 |---|---|---|
 | entry | `enter_application` | 每个 turn 一个；包含本轮输入与最终答复；`agent.custom.trigger` 区分用户发起与自动续跑 |
-| agent | `invoke_agent main` / `invoke_subagent <名字>` | 子 Agent 使用父 Agent 为它起的名字。在父 Trace 内运行的子 Agent 轮次没有 entry，agent 直接挂在启动它的工具调用下 |
+| agent | `invoke_agent <名字>` | `main`，或子 Agent 的名字（见“注意事项”）；子 Agent 带 `gen_ai.operation.name=invoke_subagent` 与 `gen_ai.agent.scope=subagent`。在父 Trace 内运行的子 Agent 轮次没有 entry，agent 直接挂在启动它的工具调用下 |
 | step | `react round_<N>` | 每次模型 step 一个 |
 | chat | `chat <模型>` | 用量（含缓存命中、推理 token）、首 token 耗时、结束原因、请求参数。输入在会话首次调用时为全量上下文，之后只上报新增部分（`gen_ai.input.messages_delta`）；`gen_ai.input.messages.hash` 对应完整上下文 |
 | tool | `execute_tool <工具名>` | 入参、结果、错误；耗时不含人工审批等待；PTC 内层调用挂在 `run_code` 下 |
+
+子 Agent 上报发起任务的那个会话的 `gen_ai.session.id`，会话分析与成本因此覆盖整个任务；它的轮次 ID 带有自己的一段（`<任务会话>:<子Agent>:t<N>`），自己的 DSH 会话 ID 保留在 `gen_ai.agent.id`。
 
 Trace 与 Span ID 由会话日志计算得出，同一个 Span 无论发送几次 ID 都相同。投递语义为至少一次：只有在请求已成功、但进程在收到响应前退出时才会产生重复。
 

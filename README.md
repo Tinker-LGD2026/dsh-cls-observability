@@ -72,13 +72,29 @@ later on, keep an empty `[]` patch file in place. Changing the environment varia
 
 ### Launched from a program (TypeScript SDK)
 
+Put the patch of step 1 in a file of its own, e.g. `/opt/dsh-cls-observability/agentobs.patch.yml`, and pass it per
+launch (the home patch works too):
+
 ```ts
+import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
+
 const harness = new DeepSeekHarness({
   patches: ['/opt/dsh-cls-observability/agentobs.patch.yml'],
   // The SDK's `env` replaces the child environment entirely: keep process.env.
   env: { ...process.env, CLS_AGENTOBS_ENABLED: 'true', CLS_AGENTOBS_REGION: 'ap-shanghai', CLS_AGENTOBS_TOPIC_ID: '…' },
 })
 ```
+
+### Good to know
+
+- **`--patch` goes before the app's own arguments.** The `dsh` launcher passes everything from the first argument it
+  does not know to the profile: `dsh --profile headless --patch p.yml --json "task"` loads the plugin,
+  `dsh --profile headless --json --patch p.yml "task"` does not.
+- **Nested subagents.** DSH allows one delegation level by default. To let subagents delegate, raise it in a patch:
+  `- id: subagent` / `config: { maxDepth: 2 }`. Every level is reported in the session of the task that started it.
+- **Subagent names.** DSH 0.2.2-rc.1 records no name for a subagent, only the task description the model gave it; that
+  description becomes the agent name (redacted, at most 80 characters) when content capture is on, and the name is
+  `subagent` when it is off. Later DSH versions record names such as `agent-1`, used as they are.
 
 ## Containers
 
@@ -119,7 +135,7 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` | – | Credentials (Basic auth to the CLS OTLP endpoint) |
 | `CLS_AGENTOBS_CREDENTIALS_FILE` | – | Instead of the two above: JSON `{secretId, secretKey}` or `KEY=value` lines; re-read when it changes |
 | `CLS_AGENTOBS_NETWORK` | public | `internal` uses the `tencentyun.com` intranet endpoint |
-| `CLS_AGENTOBS_ENDPOINT` | – | Send to an OTLP/HTTP endpoint instead (collector, relay); https, or http on loopback / with `CLS_AGENTOBS_ALLOW_HTTP=true` |
+| `CLS_AGENTOBS_ENDPOINT` | – | Send to an OTLP/HTTP endpoint instead (collector, relay); https, or http on loopback / with `CLS_AGENTOBS_ALLOW_HTTP=true` (credentials are never sent over http to another host) |
 | `CLS_AGENTOBS_CAPTURE_CONTENT` | `truncate` | Message and tool content: `truncate` / `full` / `off` (also `true` / `false`); `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is honoured too |
 | `CLS_AGENTOBS_CONTENT_MAX_CHARS` | `32000` | Per-field limit in `truncate` mode |
 | `CLS_AGENTOBS_REDACT` | `on` | Mask secrets in captured content (see below); `off` to disable |
@@ -131,12 +147,13 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | `CLS_AGENTOBS_ENTRY_TYPE` / `_ENTRY_PLATFORM` | from profile | Override `gen_ai.entry.type` / `gen_ai.entry.platform` |
 | `CLS_AGENTOBS_USER_ID` / `_USER_NAME` | – | `gen_ai.user.id` / `gen_ai.user.name` |
 | `CLS_AGENTOBS_CUSTOM_ATTRIBUTES` | – | `k=v,k2=v2` → `agent.custom.k` on every span (secret-like keys are dropped) |
-| `CLS_AGENTOBS_DATA_DIR` | `$DSH_HOME/agentobs/outbox` | Outbox directory |
+| `CLS_AGENTOBS_DATA_DIR` | `$DSH_HOME/agentobs/outbox` | Outbox directory; absolute path, owned by the DSH user (a symlink or someone else's directory is refused) |
 | `CLS_AGENTOBS_DETACHED_DELIVERY` | `true` | Deliver spans spilled at exit from a detached process |
 | `CLS_AGENTOBS_JOURNAL` | `true` | Journal spans to disk before sending (survives a crash); `false` keeps them in memory only |
 | `CLS_AGENTOBS_EXPORT_TIMEOUT_MS` | `15000` | Per request |
 | `CLS_AGENTOBS_SHUTDOWN_TIMEOUT_MS` | `3500` | In-process delivery budget at exit (DSH force-exits after 5 s) |
-| `CLS_AGENTOBS_MAX_QUEUE_SPANS` | `20000` | In-memory queue bound |
+| `CLS_AGENTOBS_MAX_QUEUE_SPANS` | `20000` | In-memory queue bound (spans) |
+| `CLS_AGENTOBS_MAX_QUEUE_MB` | `256` | In-memory queue bound (estimated size); beyond either bound the oldest spans move to the outbox |
 | `CLS_AGENTOBS_DEBUG` | `false` | Diagnostics on stderr |
 
 `gen_ai.entry.type` follows the DSH profile: `headless` → `cli`, `web` → `web`, `desktop` → `desktop`,
@@ -148,10 +165,13 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | Span | Name | Notes |
 |---|---|---|
 | entry | `enter_application` | One per turn; the turn's prompt and final answer; `agent.custom.trigger` tells user prompts from automatic continuations |
-| agent | `invoke_agent main` / `invoke_subagent <name>` | Subagents use the name their parent gave them. A subagent turn running inside its parent's trace has no entry: its agent span hangs off the tool call that started it |
+| agent | `invoke_agent <name>` | `main`, or the subagent's name (see "Good to know"); subagents have `gen_ai.operation.name=invoke_subagent` and `gen_ai.agent.scope=subagent`. A subagent turn running inside its parent's trace has no entry: its agent span hangs off the tool call that started it |
 | step | `react round_<N>` | One per model step |
 | chat | `chat <model>` | Usage (cache read/miss, reasoning), time to first token, finish reason, request parameters. Input is the full context on a session's first call, then only what each call added (`gen_ai.input.messages_delta`); `gen_ai.input.messages.hash` covers the full context |
 | tool | `execute_tool <name>` | Arguments, result, error; execution time excludes human approval waits; PTC inner calls nest under `run_code` |
+
+A subagent reports the `gen_ai.session.id` of the task that started it, so session analysis and cost cover the whole
+task; its turns get their own segment (`<task>:<child>:t<N>`) and its own DSH session id stays in `gen_ai.agent.id`.
 
 Trace and span ids are derived from the session log, so a span is identified the same way however often it is sent.
 Delivery is at least once; a duplicate can only occur when a request succeeded but the process died before its
