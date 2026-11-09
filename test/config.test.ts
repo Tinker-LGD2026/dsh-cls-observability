@@ -39,6 +39,19 @@ describe('resolveConfig', () => {
     expect(internal.enabled && internal.config.endpoint).toBe('https://ap-shanghai.cls.tencentyun.com/v1/traces')
   })
 
+  it('masks the credentials the host holds: its CLS key and credential-named variables', () => {
+    const deepseek = `sk-${'q7Lm2Np9'.repeat(4)}`
+    const clsKey = 'Zq4rT8wB2nK6mP0sV3xC7yH1jL5dF9gA'
+    const r = resolveConfig(layered({ process: { ...base, TENCENTCLOUD_SECRET_KEY: clsKey } }), 'headless', { DEEPSEEK_API_KEY: deepseek, PATH: '/usr/bin' })
+    const redactor = r.enabled ? r.config.redactor! : undefined
+    const hits = new Set<string>()
+    const out = redactor!.text(`printenv → ${clsKey} / ${deepseek}`, hits)
+    expect(out).toBe('printenv → [REDACTED:known_secret] / [REDACTED:known_secret]')
+    expect(out).not.toContain(clsKey)
+    expect(out).not.toContain(deepseek)
+    expect(hits).toContain('known_secret')
+  })
+
   it('redacts content by default; only the process environment can switch it off', () => {
     const on = resolveConfig(layered({ process: base }))
     expect(on.enabled && on.config.redactor).toBeDefined()

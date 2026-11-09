@@ -166,13 +166,20 @@ to send structure, timing and usage only.
 Before content leaves the process, secrets are masked as `[REDACTED:<rule>]` (the span is marked
 `agent.custom.content_redacted` with the rule names in `agent.custom.redacted_types`):
 
-- private keys, Tencent Cloud SecretId (`AKID…`), AWS access keys, GitHub / GitLab / Slack tokens, Google API keys,
-  `sk-…` API keys, JWTs, `Bearer` / `Basic` credentials, passwords in URLs;
-- the value of `KEY=value` / `"key": "value"` assignments whose key names a credential (`password`, `secret_key`,
-  `api_key`, `token`, …), and values under such keys in tool arguments.
+- **secrets this host holds**, wherever and however they appear (`printenv` output, a quoted value, prose): the CLS
+  key in use and every credential-named environment variable of the DSH process (`*_SECRET*`, `*_TOKEN`, `*_API_KEY`,
+  `*PASSWORD*`, …; paths, URLs and plain words are skipped). This is what catches a bare cloud SecretKey, which is just
+  random characters;
+- formats with a recognisable prefix: private keys, Tencent Cloud SecretId (`AKID…`), AWS (`AKIA…`), Alibaba Cloud
+  (`LTAI…`), Volcengine (`AKLT…`), Azure connection-string keys, GitHub / GitLab / Slack / Hugging Face tokens, Google
+  API keys, `sk-…` / `sk_live_…` API keys, JWTs, `Bearer` / `Basic` credentials, passwords in URLs;
+- the value after a credential-named key: `KEY=value`, `"key": "value"`, `--secret-key value`, `密码是 value`,
+  `SecretKey：value`, and values under such keys in tool arguments. Code is left alone (`token = getToken()`,
+  `password: $DB_PASS`, `apiKey: string`, `token = requestToken`).
 
-Redaction is pattern based: it catches common formats, not every secret. Add your own formats with
-`CLS_AGENTOBS_REDACT_PATTERNS`, or turn content capture off.
+What it cannot catch: a third-party secret without a prefix (an AWS secret key, another account's SecretKey) that
+appears on its own, with no key name next to it and is not in this host's environment — it is indistinguishable from
+a hash or an id. Add your own formats with `CLS_AGENTOBS_REDACT_PATTERNS`, or turn content capture off.
 
 ## Develop
 

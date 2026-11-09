@@ -6,6 +6,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readSessionLog, replaySession, replaySessionGroup } from '../src/replay.ts'
+import { BUILTIN_RULES, Redactor } from '../src/redact.ts'
 import { fromRecord, validateSpans } from '../src/spec-check.ts'
 import type { SpanRecord } from '../src/otlp/types.ts'
 import { fromSpan, renderTree as renderNodes } from '../src/tree.ts'
@@ -88,6 +89,17 @@ describe.skipIf(logs.length === 0)('DSH session fixtures', () => {
       expect(spans.filter((s) => kindOf(s) === 'tool').length).toBe(nativeResults + ptcResults)
     })
   }
+})
+
+describe.skipIf(logs.length === 0)('redaction on real sessions', () => {
+  it('masks nothing in the recorded sessions (no false positives on ordinary agent work)', () => {
+    const hits: string[] = []
+    for (const file of logs) {
+      const spans = replaySession(readSessionLog(file), { ...options, captureContent: true, maxContentChars: 1_000_000, redactor: new Redactor(BUILTIN_RULES) })
+      for (const s of spans) if (s.attributes['agent.custom.redacted_types']) hits.push(`${rel(file)}: ${s.name} ${String(s.attributes['agent.custom.redacted_types'])}`)
+    }
+    expect(hits).toEqual([])
+  })
 })
 
 describe.skipIf(logs.length === 0)('CLS spec naming and content (capture on)', () => {

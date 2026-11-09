@@ -4,7 +4,7 @@
  * (optionally also `$DSH_HOME/.env`), never from a project `.env`, which a
  * cloned repository controls.
  */
-import { buildRedactor, type Redactor } from './redact.ts'
+import { buildRedactor, secretsFromEnv, type Redactor } from './redact.ts'
 import { readFileSync, statSync } from 'node:fs'
 import type { Credentials } from './exporter.ts'
 
@@ -152,7 +152,11 @@ export function entryForProfile(profile: string | undefined): { type?: string; p
   }
 }
 
-export function resolveConfig(env: EnvReader, profileName?: string): ConfigResult {
+/**
+ * @param processEnv - the real process environment, scanned for credential values to
+ *   mask in captured content (never for configuration: that goes through `env`).
+ */
+export function resolveConfig(env: EnvReader, profileName?: string, processEnv: NodeJS.ProcessEnv = process.env): ConfigResult {
   const warnings: string[] = []
   const trustUserEnv = truthy(env.getFrom('CLS_AGENTOBS_TRUST_USER_ENV', ['process'])?.value)
   const trusted: EnvSource[] = trustUserEnv ? ['process', 'user-env'] : ['process']
@@ -212,7 +216,20 @@ export function resolveConfig(env: EnvReader, profileName?: string): ConfigResul
   const entryPlatform = get('CLS_AGENTOBS_ENTRY_PLATFORM') ?? entry.platform
   const rawMode = get('CLS_AGENTOBS_CAPTURE_CONTENT') ?? get('OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT')
   const contentMode = parseContentMode(rawMode)
-  const redactor = buildRedactor(get('CLS_AGENTOBS_REDACT'), get('CLS_AGENTOBS_REDACT_PATTERNS'), (m) => warnings.push(m))
+  // Exact values the host holds: credential-named variables of the real process environment
+  // and the CLS key in use (re-read, so a rotated credentials file stays covered).
+  const envSecrets = secretsFromEnv(processEnv)
+  let lastCreds: Credentials | undefined
+  let knownCache: readonly string[] = envSecrets
+  const known = (): readonly string[] => {
+    const c = credentials?.()
+    if (c !== lastCreds) {
+      lastCreds = c
+      knownCache = c ? [...envSecrets, c.secretId, c.secretKey] : envSecrets
+    }
+    return knownCache
+  }
+  const redactor = buildRedactor(get('CLS_AGENTOBS_REDACT'), get('CLS_AGENTOBS_REDACT_PATTERNS'), (m) => warnings.push(m), known)
   if (rawMode !== undefined && contentMode === undefined) warnings.push(`unknown content capture mode "${rawMode}"; using truncate`)
   const dataDir = get('CLS_AGENTOBS_DATA_DIR')
   const proxy: Record<string, string> = {}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BUILTIN_RULES, Redactor, buildRedactor } from '../src/redact.ts'
+import { BUILTIN_RULES, Redactor, buildRedactor, isMaskableSecret, secretsFromEnv } from '../src/redact.ts'
 import { Truncator } from '../src/semconv.ts'
 
 const r = new Redactor(BUILTIN_RULES)
@@ -94,6 +94,82 @@ describe('redaction', () => {
     expect(warnings.join()).toMatch(/invalid redaction pattern/)
     buildRedactor(undefined, 'not json', (m) => warnings.push(m))
     expect(warnings.join()).toMatch(/must be a JSON array/)
+  })
+
+  it('masks more vendor formats', () => {
+    const cases: [string, string][] = [
+      [`ak ${fake('LTAI', 20)}`, 'alibaba_access_key'],
+      [`volc ${fake('AKLT', 44)}`, 'volcengine_access_key'],
+      [`DefaultEndpointsProtocol=https;AccountName=a;AccountKey=${fake('', 64)}==;EndpointSuffix=core.windows.net`, 'azure_key'],
+      [`HF ${fake('hf_', 34)}`, 'huggingface_token'],
+      [`stripe ${fake('sk_live_', 24)}`, 'api_key'],
+      [`openrouter ${fake('sk-or-v1-', 40)}`, 'api_key'],
+    ]
+    for (const [input, rule] of cases) {
+      const { out, hits } = run(input)
+      expect(out, input).toContain('[REDACTED:')
+      expect(hits, input).toContain(rule)
+    }
+  })
+
+  it('masks command-line flags and Chinese wording, keeping the key', () => {
+    const k = fake('', 32)
+    expect(run(`tccli cvm DescribeInstances --secretKey ${k} --region ap-shanghai`).out).toBe('tccli cvm DescribeInstances --secretKey [REDACTED:cli_flag] --region ap-shanghai')
+    expect(run(`mysql --password "${k}" -u root`).out).toBe('mysql --password "[REDACTED:cli_flag]" -u root')
+    expect(run(`密钥是 ${k}，请保存`).out).toBe('密钥是 [REDACTED:assignment]，请保存')
+    expect(run(`数据库密码：${k}`).out).toBe('数据库密码：[REDACTED:assignment]')
+    expect(run(`SecretKey：${k}`).out).toBe('SecretKey：[REDACTED:assignment]')
+    expect(run(`API 令牌为 “${k}”`).out).toBe('API 令牌为 “[REDACTED:assignment]”')
+  })
+
+  it('leaves code and prose around those wordings alone', () => {
+    const benign = [
+      'mysql --password $DB_PASSWORD -u root',
+      'deploy --token "${{ secrets.DEPLOY_TOKEN }}"',
+      'cli --api-key --verbose',
+      '密码为空',
+      '请输入密码：',
+      '密钥是什么意思？',
+      '密码 = getPassword()',
+      'token: string;',
+      'password=$PASSWORD',
+    ]
+    for (const text of benign) expect(run(text).out, text).toBe(text)
+  })
+
+  it('masks known secret values wherever they appear, and follows rotation', () => {
+    const key = fake('', 32)
+    let current = [key]
+    const known = new Redactor(BUILTIN_RULES, () => current)
+    const hits = new Set<string>()
+    expect(known.text(`env 输出：${key}`, hits)).toBe('env 输出：[REDACTED:known_secret]')
+    expect(known.text(`x${key}y`, hits)).toBe('x[REDACTED:known_secret]y')
+    expect([...hits]).toEqual(['known_secret'])
+    const rotated = fake('Z', 31)
+    current = [rotated]
+    expect(known.text(`old ${key} new ${rotated}`, new Set())).toBe(`old ${key} new [REDACTED:known_secret]`)
+    // Values too plain to mask safely are ignored.
+    expect(new Redactor([], () => ['password', '12345678', 'short']).text('password 12345678 short', new Set())).toBe('password 12345678 short')
+  })
+
+  it('takes credential values from the environment, not paths, settings or plain words', () => {
+    const env = {
+      DEEPSEEK_API_KEY: fake('sk-', 32),
+      TENCENTCLOUD_SECRET_KEY: fake('', 32),
+      GITHUB_TOKEN: fake('ghp_', 36),
+      DB_PASSWORD: 'Hunter2Hunter2',
+      GOOGLE_APPLICATION_CREDENTIALS: '/etc/gcp/key.json',
+      CLS_AGENTOBS_CREDENTIALS_FILE: '/run/secrets/cls',
+      TOKENIZERS_PARALLELISM: 'false',
+      MAX_TOKENS: '4096',
+      SECRET_MODE: 'strict-mode-on',
+      API_KEY_URL: 'https://vault.internal/keys',
+      PATH: '/usr/bin',
+      HOME: '/root',
+    }
+    expect(secretsFromEnv(env).sort()).toEqual([env.DB_PASSWORD, env.DEEPSEEK_API_KEY, env.GITHUB_TOKEN, env.TENCENTCLOUD_SECRET_KEY].sort())
+    expect(isMaskableSecret('development')).toBe(false)
+    expect(isMaskableSecret('changeme123')).toBe(true)
   })
 
   it('stays fast on large content', () => {

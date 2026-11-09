@@ -123,10 +123,11 @@ Trace 与 Span ID 由会话日志计算得出，同一个 Span 无论发送几�
 
 内容离开进程前会先脱敏，命中处替换为 `[REDACTED:<规则名>]`，Span 上标注 `agent.custom.content_redacted`，命中的规则记录在 `agent.custom.redacted_types`：
 
-- 私钥、腾讯云 SecretId（`AKID…`）、AWS Access Key、GitHub / GitLab / Slack Token、Google API Key、`sk-…` 形式的 API Key、JWT、`Bearer` / `Basic` 凭证、URL 中的密码；
-- 键名表示凭证的 `KEY=value`、`"key": "value"` 赋值（如 `password`、`secret_key`、`api_key`、`token`），以及工具入参中这类键下的值。
+- **本机持有的密钥**：无论以什么形式出现（`printenv` 输出、引号里的值、一段文字），都会被打码。包括插件正在使用的 CLS 密钥，以及 DSH 进程环境里所有名字像凭证的变量（`*_SECRET*`、`*_TOKEN`、`*_API_KEY`、`*PASSWORD*` 等；路径、URL、普通单词会跳过）。没有前缀、只是一串随机字符的云厂商 SecretKey，靠的就是这一层；
+- 有固定前缀的格式：私钥、腾讯云 SecretId（`AKID…`）、AWS（`AKIA…`）、阿里云（`LTAI…`）、火山引擎（`AKLT…`）、Azure 连接串中的密钥、GitHub / GitLab / Slack / Hugging Face Token、Google API Key、`sk-…` / `sk_live_…` 形式的 API Key、JWT、`Bearer` / `Basic` 凭证、URL 中的密码；
+- 凭证类键名后面的值：`KEY=value`、`"key": "value"`、`--secret-key value`、`密码是 value`、`SecretKey：value`，以及工具入参中这类键下的值。代码写法不会被打码，如 `token = getToken()`、`password: $DB_PASS`、`apiKey: string`、`token = requestToken`。
 
-脱敏基于规则匹配，能覆盖常见格式，但不能保证识别所有密钥。可用 `CLS_AGENTOBS_REDACT_PATTERNS` 补充自己的格式，或关闭内容采集。
+识别不了的情况：不在本机环境里、没有前缀的第三方密钥（例如 AWS Secret Key、其他账号的 SecretKey）单独出现，旁边也没有键名。这种字符串和哈希值、ID 无法区分。可用 `CLS_AGENTOBS_REDACT_PATTERNS` 补充自己的格式，或关闭内容采集。
 
 ## 开发
 
