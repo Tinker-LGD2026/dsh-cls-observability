@@ -39,7 +39,8 @@
     "README.zh-CN.md",
     "deploy",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

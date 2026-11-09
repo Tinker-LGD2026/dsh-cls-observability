@@ -70,7 +70,7 @@ if (run.status !== 0) {
 for (let i = 0; i < 60; i++) {
   const logs = spawnSync('docker', ['logs', name], { encoding: 'utf8' })
   const out = `${logs.stdout}${logs.stderr}`
-  const url = /dsh web:\s*(\S+)/.exec(out)?.[1]
+  const url = /dsh web:\s*(https?:\/\/\S+)/.exec(out)?.[1]
   if (url) {
     console.log(`DSH web is up (plugin ${out.includes('[cls-agentobs]') ? 'loaded' : 'NOT loaded'}).`)
     console.log(`Open: ${url}`)

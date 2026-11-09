@@ -167,7 +167,7 @@ All variables are read from the real process environment only. `$DSH_HOME/.env` 
 | entry | `enter_application` | One per turn; the turn's prompt and final answer; `agent.custom.trigger` tells user prompts from automatic continuations |
 | agent | `invoke_agent <name>` | `main`, or the subagent's name (see "Good to know"); subagents have `gen_ai.operation.name=invoke_subagent` and `gen_ai.agent.scope=subagent`. A subagent turn running inside its parent's trace has no entry: its agent span hangs off the tool call that started it |
 | step | `react round_<N>` | One per model step |
-| chat | `chat <model>` | Usage (cache read/miss, reasoning), time to first token, finish reason, request parameters. Input is the full context on a session's first call, then only what each call added (`gen_ai.input.messages_delta`); `gen_ai.input.messages.hash` covers the full context |
+| chat | `chat <model>` | Usage (cache read/miss, reasoning), time to first token, finish reason, request parameters. Input is the full context on a session's first call, then only what each call added (`gen_ai.input.messages_delta`, starting at message `agent.custom.input_delta_start` of `agent.custom.input_message_count`); `gen_ai.input.messages.hash` covers the full context |
 | tool | `execute_tool <name>` | Arguments, result, error; execution time excludes human approval waits; PTC inner calls nest under `run_code` |
 
 A subagent reports the `gen_ai.session.id` of the task that started it, so session analysis and cost cover the whole

@@ -508,6 +508,7 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
       { role: 'user', parts: [{ type: 'text', content: 'q120' }] },
     ])
     expect(long.at(-1)!.attributes['agent.custom.input_message_count']).toBe(239)
+    expect(long.at(-1)!.attributes['agent.custom.input_delta_start']).toBe(237)
 
     // Compaction replaces the history with a summary: full report of what remains, new hash.
     const before = long.at(-1)!.attributes['gen_ai.input.messages.hash']

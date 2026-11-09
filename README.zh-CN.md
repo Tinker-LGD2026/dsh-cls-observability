@@ -124,7 +124,7 @@ const harness = new DeepSeekHarness({
 | entry | `enter_application` | 每个 turn 一个；包含本轮输入与最终答复；`agent.custom.trigger` 区分用户发起与自动续跑 |
 | agent | `invoke_agent <名字>` | `main`，或子 Agent 的名字（见“注意事项”）；子 Agent 带 `gen_ai.operation.name=invoke_subagent` 与 `gen_ai.agent.scope=subagent`。在父 Trace 内运行的子 Agent 轮次没有 entry，agent 直接挂在启动它的工具调用下 |
 | step | `react round_<N>` | 每次模型 step 一个 |
-| chat | `chat <模型>` | 用量（含缓存命中、推理 token）、首 token 耗时、结束原因、请求参数。输入在会话首次调用时为全量上下文，之后只上报新增部分（`gen_ai.input.messages_delta`）；`gen_ai.input.messages.hash` 对应完整上下文 |
+| chat | `chat <模型>` | 用量（含缓存命中、推理 token）、首 token 耗时、结束原因、请求参数。输入在会话首次调用时为全量上下文，之后只上报新增部分（`gen_ai.input.messages_delta`，从完整输入的第 `agent.custom.input_delta_start` 条开始，共 `agent.custom.input_message_count` 条，序号从 0 起）；`gen_ai.input.messages.hash` 对应完整上下文 |
 | tool | `execute_tool <工具名>` | 入参、结果、错误；耗时不含人工审批等待；PTC 内层调用挂在 `run_code` 下 |
 
 子 Agent 上报发起任务的那个会话的 `gen_ai.session.id`，会话分析与成本因此覆盖整个任务；它的轮次 ID 带有自己的一段（`<任务会话>:<子Agent>:t<N>`），自己的 DSH 会话 ID 保留在 `gen_ai.agent.id`。

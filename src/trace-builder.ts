@@ -1094,6 +1094,8 @@ export class SessionTracer {
     }
     if (reset === undefined) {
       attrs['gen_ai.input.messages_delta'] = tail(total - previous).map((m) => messageToGenAi(m, t))
+      // 0-based index of the first delta message in the full input (of `input_message_count`).
+      attrs['agent.custom.input_delta_start'] = previous
     } else {
       // Bound one full report; keep the most recent messages when the history is very long.
       const available = tail(total)
