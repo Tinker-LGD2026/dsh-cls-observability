@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process'
-import { mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import { deliverOutbox } from '../src/deliver.ts'
-import { Outbox } from '../src/outbox.ts'
+import { FOREIGN_STALE_MS, OWNER, Outbox } from '../src/outbox.ts'
 import { ExportQueue } from '../src/queue.ts'
 import { SpanKind, type SpanRecord } from '../src/otlp/types.ts'
 import { decode } from './otlp-schema.ts'
@@ -43,7 +43,7 @@ describe('outbox', () => {
     for (let i = 0; i < 3; i++) down.push(span(i))
     const stopped = await down.stop(300)
     expect(stopped.delivered).toBe(false)
-    expect(stopped.spillFile).toBeDefined()
+    expect(stopped.spilled).toBe(true)
     expect(down.stats.spilled).toBe(3)
     expect(down.stats.dropped).toBe(0)
     expect(outbox.pending()).toHaveLength(1)
@@ -123,7 +123,7 @@ describe('outbox', () => {
     const stopped = await q.stop(500, () => true)
     expect(calls).toBe(0)
     expect(outbox.pending()).toHaveLength(1)
-    expect(stopped.spillFile).toBeDefined()
+    expect(stopped.spilled).toBe(true)
   })
 
   it('hands an in-flight batch over to other senders when its request fails', async () => {
@@ -156,6 +156,34 @@ describe('outbox', () => {
     renameSync(claimed!, `${file}.sending-999999`)
     expect(outbox.recoverStaleClaims()).toBe(1)
     expect(outbox.pending()).toEqual([file])
+  })
+
+  it('judges claims from another PID namespace by age: kept while fresh, reclaimed when stale', () => {
+    const dir = tempDir()
+    const outbox = new Outbox(dir)
+    const fresh = outbox.spillSync(new Uint8Array([1]))!
+    const stale = outbox.spillSync(new Uint8Array([2]))!
+    // Same pid as ours, other namespace: a relay sidecar looking at the host's claim.
+    renameSync(fresh, `${fresh}.sending-${process.pid}.4026539999`)
+    renameSync(stale, `${stale}.sending-${process.pid}.4026539999`)
+    const old = new Date(Date.now() - FOREIGN_STALE_MS - 60_000)
+    utimesSync(`${stale}.sending-${process.pid}.4026539999`, old, old)
+    expect(outbox.recoverStaleClaims()).toBe(1)
+    expect(outbox.pending()).toEqual([stale])
+    expect(outbox.foreignClaims()).toBe(1)
+    expect(OWNER).toMatch(new RegExp(`^${process.pid}\\.`))
+  })
+
+  it('refuses an outbox directory it does not own or that is a symlink, and closes a world-readable one', () => {
+    const base = tempDir()
+    const real = path.join(base, 'real')
+    mkdirSync(real)
+    const link = path.join(base, 'link')
+    symlinkSync(real, link)
+    expect(new Outbox(link).ensure()).toBe(false)
+    chmodSync(real, 0o755)
+    expect(new Outbox(real).ensure()).toBe(true)
+    expect(new Outbox(real).spillSync(new Uint8Array([1]))).toBeDefined()
   })
 
   it('waits for a live host holding a file, then sends it once the host has exited', async () => {

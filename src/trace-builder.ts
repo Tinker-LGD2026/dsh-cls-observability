@@ -201,12 +201,19 @@ const MAX_TURN_REFS = 64
 const ns = (ms: number): bigint => BigInt(Math.round(ms)) * 1_000_000n
 const ms = (value: number): number => Math.max(0, Math.round(value))
 
-function scalarAttributes(data: unknown, limit = 128): Attributes {
+/**
+ * Scalars of a state-change event. Strings with spaces are free text (a goal the user
+ * typed): sent only with content capture on, and redacted. Settings and ids are kept.
+ */
+function scalarAttributes(data: unknown, text: ((value: string) => string) | undefined, limit = 128): Attributes {
   const out: Attributes = {}
   if (typeof data !== 'object' || data === null) return out
   for (const [key, value] of Object.entries(data)) {
     if (typeof value === 'number' || typeof value === 'boolean') out[key] = value
-    else if (typeof value === 'string' && value.length <= limit) out[key] = value
+    else if (typeof value === 'string' && value.length <= limit) {
+      if (!/\s/.test(value)) out[key] = value
+      else if (text) out[key] = text(value)
+    }
   }
   return out
 }
@@ -246,7 +253,7 @@ export function catalogEntry(data: unknown): CatalogEntry | undefined {
   const d = data as { childId?: unknown; name?: unknown; label?: unknown } | undefined
   if (!d || typeof d.childId !== 'string') return undefined
   const label = typeof d.label === 'string' && d.label.trim() ? d.label.trim().slice(0, 80) : undefined
-  const name = typeof d.name === 'string' && d.name.trim() ? d.name.trim() : label
+  const name = typeof d.name === 'string' && d.name.trim() ? d.name.trim() : undefined
   return { childId: d.childId, ...(name ? { name } : {}), ...(label ? { label } : {}) }
 }
 
@@ -350,6 +357,23 @@ export class SessionTracer {
   }
 
   /** Name of a direct child recorded in this session's `subagent/catalog`. */
+  /**
+   * The session was disposed: keep only what later lookups need (turn links, the subagent
+   * catalog, the task root) and drop message bodies, open-call state and tool definitions.
+   */
+  retire(): void {
+    this.rootSessionId()
+    this.turns.clear()
+    this.steps.clear()
+    this.tools.clear()
+    this.approvals.clear()
+    this.auxCounts.clear()
+    this.surface = []
+    this.released = 0
+    delete this.toolDefinitions
+    delete this.config
+  }
+
   childEntry(childId: string): CatalogEntry | undefined {
     return this.catalog.get(childId)
   }
@@ -489,7 +513,7 @@ export class SessionTracer {
       case 'approval/decided': return this.onApprovalDecided(event)
       default:
         if (event.type === 'compaction/end') this.touchBaseline(event)
-        if (AGENT_SPAN_EVENTS.has(event.type)) this.addTurnEvent(event.type, event.time, scalarAttributes(event.data ?? {}))
+        if (AGENT_SPAN_EVENTS.has(event.type)) this.addTurnEvent(event.type, event.time, this.eventAttributes(event.data ?? {}))
     }
   }
 
@@ -615,6 +639,12 @@ export class SessionTracer {
     if (known) return known.kind
     const nonContext = sources.find((s) => s.kind !== 'runtime-context' && !CONTEXT_FORMS.has(s.form ?? ''))
     return nonContext?.kind ?? 'unknown'
+  }
+
+  private eventAttributes(data: unknown): Attributes {
+    const redactor = this.options.redactor
+    const text = this.options.captureContent ? (v: string) => (redactor ? redactor.text(v, new Set()) : v) : undefined
+    return scalarAttributes(data, text)
   }
 
   private addTurnEvent(name: string, timeMs: number, attributes: Attributes): void {
@@ -1297,9 +1327,19 @@ export class SessionTracer {
     return this.header.parentSession ? this.resolveName?.(this.header.parentSession, this.sessionId) : undefined
   }
 
+  /**
+   * The subagent's creation label (the task description the model wrote) is content: it
+   * is used only when content capture is on, and redacted like other content.
+   */
+  private subagentLabel(): string | undefined {
+    const label = this.catalogFacts()?.label
+    if (!label || !this.options.captureContent) return undefined
+    return this.options.redactor ? this.options.redactor.text(label, new Set()) : label
+  }
+
   private agentName(): string {
     if (this.header.origin === 'subagent' || this.header.parentSession) {
-      const name = this.catalogFacts()?.name
+      const name = this.catalogFacts()?.name ?? this.subagentLabel()
       if (name) return name
       if (this.header.origin === 'subagent') return this.header.agentPreset ?? 'subagent'
     }
@@ -1351,7 +1391,7 @@ export class SessionTracer {
       ...(this.header.origin === 'subagent' ? { 'gen_ai.agent.scope': 'subagent' } : {}),
       ...(this.parent ? { 'gen_ai.subagent.parent_tool_call.id': this.parent.callId } : {}),
       ...(this.header.parentSession ? { 'agent.custom.parent_session_id': this.header.parentSession } : {}),
-      ...(this.header.origin === 'subagent' && this.catalogFacts()?.label ? { 'agent.custom.subagent_label': this.catalogFacts()!.label! } : {}),
+      ...(this.header.origin === 'subagent' && this.subagentLabel() ? { 'agent.custom.subagent_label': this.subagentLabel()! } : {}),
       ...(typeof this.header.delegationDepth === 'number' && this.header.delegationDepth > 0 ? { 'agent.custom.delegation_depth': this.header.delegationDepth } : {}),
       ...(this.options.source === 'replay' ? { 'agent.custom.source': 'replay' } : {}),
     }

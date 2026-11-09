@@ -21,11 +21,26 @@ const CONTENT_KEYS = [
   'gen_ai.tool.definitions',
   'gen_ai.tool.call.arguments',
   'gen_ai.tool.call.result',
+  'gen_ai.tool.error.message',
 ] as const
 
 const MARK = '…[truncated: span size limit]'
 
 const json = (value: unknown) => JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))
+
+/** Cheap in-memory size estimate (string lengths, no serialisation): for queue accounting. */
+export function approxSpanBytes(span: SpanRecord): number {
+  let n = 256 + span.name.length
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') n += v.length
+    else if (depth > 16 || v === null || typeof v !== 'object') n += 8
+    else if (Array.isArray(v)) for (const x of v) walk(x, depth + 1)
+    else for (const [k, x] of Object.entries(v)) { n += k.length; walk(x, depth + 1) }
+  }
+  walk(span.attributes, 0)
+  if (span.events) walk(span.events, 0)
+  return n
+}
 
 /** Approximate stored size in bytes (UTF-8 of the JSON CLS keeps). */
 export function spanBytes(span: SpanRecord): number {

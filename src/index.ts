@@ -49,8 +49,20 @@ const loadedAt = Date.now()
 
 function logger(debug: boolean): (level: 'debug' | 'warn', message: string) => void {
   // stderr only: in the sdk/acp profiles stdout carries the JSON-RPC protocol.
+  // Without debug, a repeated warning (retries during an outage) is printed once a minute
+  // with a count, so it does not flood an interactive terminal.
+  const lastShown = new Map<string, { at: number; suppressed: number }>()
   return (level, message) => {
     if (level === 'debug' && !debug) return
+    if (level === 'warn' && !debug) {
+      const key = message.replace(/\d+/g, '#').slice(0, 60)
+      const seen = lastShown.get(key)
+      const now = Date.now()
+      if (seen && now - seen.at < 60_000) { seen.suppressed++; return }
+      if (seen?.suppressed) message += ` (${seen.suppressed} similar warnings suppressed)`
+      lastShown.set(key, { at: now, suppressed: 0 })
+      if (lastShown.size > 100) lastShown.delete(lastShown.keys().next().value!)
+    }
     const t = debug ? ` +${((Date.now() - loadedAt) / 1000).toFixed(2)}s` : ''
     process.stderr.write(`[cls-agentobs]${t} ${level}: ${message}\n`)
   }
@@ -62,7 +74,9 @@ function outboxDir(ctx: PluginContext, configured: string | undefined): string {
   if (typeof homePath === 'function') {
     try { return (homePath as (...s: string[]) => string)('agentobs', 'outbox') } catch { /* fall through */ }
   }
-  return path.join(tmpdir(), 'dsh-cls-observability', 'outbox')
+  // Per-user name: on Linux the temp directory is shared by every account.
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 'user'
+  return path.join(tmpdir(), `dsh-cls-observability-${uid}`, 'outbox')
 }
 
 export function apply(ctx: PluginContext): void {
@@ -120,6 +134,7 @@ export function apply(ctx: PluginContext): void {
     maxBatchSpans: 512,
     flushIntervalMs: 2_000,
     maxQueueSpans: config.maxQueueSpans,
+    maxQueueBytes: config.maxQueueBytes,
     ...(outboxUsable ? { outbox } : {}),
     ...(outboxUsable && config.journal ? { journal: new Journal(outbox.dir, { resource, scope }, log) } : {}),
     log,
@@ -127,7 +142,7 @@ export function apply(ctx: PluginContext): void {
 
   // Turns this process has open: lets crash closure in a later process skip what was already sent.
   const openSpans = outboxUsable ? new OpenSpansLedger(outbox.dir) : undefined
-  openSpans?.foldDead(alive)
+  openSpans?.foldDead()
   const collector = new Collector({
     ...(outboxUsable ? { closedTurns: new ClosedTurnsFile(outbox.dir), emittedSpans: openSpans! } : {}),
     builder: {
@@ -266,7 +281,8 @@ async function runFlush(dirArg: string | undefined): Promise<number> {
  */
 async function runRelay(dirArg: string | undefined): Promise<number> {
   const { dir, exporter, log } = commandSetup(dirArg)
-  const interval = Number(process.env.CLS_AGENTOBS_RELAY_INTERVAL_MS ?? 5_000)
+  const raw = Number(process.env.CLS_AGENTOBS_RELAY_INTERVAL_MS ?? 5_000)
+  const interval = Number.isFinite(raw) ? Math.min(3_600_000, Math.max(500, raw)) : 5_000
   let stopping = false
   let wake: (() => void) | undefined
   const stop = () => { stopping = true; wake?.() }
@@ -312,7 +328,8 @@ async function runSelftest(dirArg: string | undefined): Promise<number> {
   const verdict: Record<string, string> = {
     ok: `reachable, credentials and topic accepted (${ms} ms)`,
     auth: `credentials rejected: ${'error' in probe ? probe.error.trim() : ''}`,
-    rejected: `request rejected (wrong topic or endpoint?): ${'error' in probe ? probe.error.trim() : ''}`,
+    config: `topic or endpoint not found: ${'error' in probe ? probe.error.trim() : ''}`,
+    rejected: `request rejected: ${'error' in probe ? probe.error.trim() : ''}`,
     retryable: `not reachable: ${'error' in probe ? probe.error.trim() : ''}`,
   }
   out(probe.kind === 'ok', 'destination', verdict[probe.kind] ?? probe.kind)

@@ -78,6 +78,13 @@ describe('redaction', () => {
     expect([...hits]).toEqual(['key'])
   })
 
+  it('masks credential-named keys in tool-call arguments inside messages, leaving other arguments verbatim', () => {
+    const t = new Truncator(10_000, r)
+    expect(t.json('{"url": "https://x", "password": "Summer"}')).toBe('{"url":"https://x","password":"[REDACTED:key]"}')
+    expect(t.json('{ "path": "a.txt" }')).toBe('{ "path": "a.txt" }')
+    expect(t.json('not json password=correcthorse')).toBe('not json password=[REDACTED:assignment]')
+  })
+
   it('redacts before truncating, so a cut never exposes part of a secret', () => {
     const t = new Truncator(30, r)
     const out = t.text(`xxxxxxxxxxxxxxxxxxxx ${fake('AKID', 32)}`)
@@ -170,6 +177,29 @@ describe('redaction', () => {
     expect(secretsFromEnv(env).sort()).toEqual([env.DB_PASSWORD, env.DEEPSEEK_API_KEY, env.GITHUB_TOKEN, env.TENCENTCLOUD_SECRET_KEY].sort())
     expect(isMaskableSecret('development')).toBe(false)
     expect(isMaskableSecret('changeme123')).toBe(true)
+  })
+
+  it('has no rule that backtracks on adversarial input (each under 50 ms on 100 KB)', () => {
+    const inputs = ['a.'.repeat(50_000), 'x-'.repeat(50_000), 'abc '.repeat(25_000), 'token='.repeat(16_000), 'password '.repeat(11_000),
+      '--token '.repeat(12_500), 'a'.repeat(100_000), 'Bearer '.repeat(14_000), 'eyJabcdefgh.'.repeat(8_000), '密码是'.repeat(30_000),
+      'a://'.repeat(25_000), 'http://u:'.repeat(11_000), `${'x'.repeat(50_000)}@`]
+    for (const rule of BUILTIN_RULES) {
+      const one = new Redactor([rule])
+      for (const input of inputs) {
+        const start = performance.now()
+        one.text(input, new Set())
+        expect(performance.now() - start, `${rule.name} on ${input.slice(0, 12)}…`).toBeLessThan(50)
+      }
+    }
+  })
+
+  it('redacts only what is kept from huge content, and still masks a secret at the cut', () => {
+    const t = new Truncator(1000, r)
+    const key = fake('AKID', 32)
+    const out = t.text(`${'z'.repeat(990)} ${key} ${'q'.repeat(2_000_000)}`)
+    expect(out).not.toContain(key.slice(0, 10))
+    expect(out).toMatch(/…\[truncated \d+ chars\]$/)
+    expect(Number(/truncated (\d+)/.exec(out)![1])).toBeGreaterThan(2_000_000 - 100)
   })
 
   it('stays fast on large content', () => {

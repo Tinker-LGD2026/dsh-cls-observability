@@ -73,7 +73,7 @@ async function deliverPending(
         outbox.release(claimed)
         log(`delivery failed (${result.kind}): ${result.error}`)
         failed = true
-        if (result.kind === 'auth') return { delivered, stop: true }
+        if (result.kind === 'auth' || result.kind === 'config') return { delivered, stop: true }
         break
       }
     }
@@ -107,7 +107,8 @@ export function spawnDeliverer(input: DelivererSpawn, moduleUrl: string): boolea
       ...input.proxy,
       ...(Object.keys(input.proxy).length > 0 ? { NODE_USE_ENV_PROXY: '1' } : {}),
     }
-    for (const key of ['PATH', 'HOME', 'TMPDIR', 'SystemRoot', 'USERPROFILE']) {
+    // Plus the TLS trust settings of corporate networks, or delivery fails where the host works.
+    for (const key of ['PATH', 'HOME', 'TMPDIR', 'SystemRoot', 'USERPROFILE', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_USE_SYSTEM_CA']) {
       const value = process.env[key]
       if (value !== undefined) env[key] = value
     }

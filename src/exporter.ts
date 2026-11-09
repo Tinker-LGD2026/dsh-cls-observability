@@ -28,10 +28,22 @@ export type ExportResult =
   | { kind: 'retryable'; status?: number; retryAfterMs?: number; error: string }
   /** 401/403: credentials problem; keep data, pause, alert. */
   | { kind: 'auth'; status: number; error: string }
-  /** Other 4xx: the payload itself is rejected; isolate and drop. */
+  /** 404: wrong topic or endpoint; a configuration problem, never the payload: keep data, pause. */
+  | { kind: 'config'; status: number; error: string }
+  /** Other 4xx (400, 413, …): the payload itself is rejected; isolate and drop. */
   | { kind: 'rejected'; status: number; error: string }
 
 const MAX_ERROR_BODY = 512
+const MAX_RETRY_AFTER_MS = 5 * 60_000
+
+function secureFor(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint)
+    return url.protocol === 'https:' || ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
 
 export function basicAuth(credentials: Credentials): string {
   return `Basic ${Buffer.from(`${credentials.secretId}:${credentials.secretKey}`).toString('base64')}`
@@ -40,9 +52,10 @@ export function basicAuth(credentials: Credentials): string {
 function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined
   const seconds = Number(value)
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+  // Capped: a huge value would overflow setTimeout, which then fires after 1 ms.
+  if (Number.isFinite(seconds)) return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, seconds * 1000))
   const date = Date.parse(value)
-  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now())
+  return Number.isNaN(date) ? undefined : Math.min(MAX_RETRY_AFTER_MS, Math.max(0, date - Date.now()))
 }
 
 export function classifyStatus(status: number, body: string, retryAfter: string | null): ExportResult {
@@ -53,6 +66,7 @@ export function classifyStatus(status: number, body: string, retryAfter: string 
     return retryAfterMs === undefined ? { kind: 'retryable', status, error } : { kind: 'retryable', status, retryAfterMs, error }
   }
   if (status === 401 || status === 403) return { kind: 'auth', status, error }
+  if (status === 404) return { kind: 'config', status, error }
   return { kind: 'rejected', status, error }
 }
 
@@ -66,7 +80,8 @@ export function buildRequest(config: ExporterConfig, batch: ExportBatch): { head
   }
   if (config.topicId) headers['topic_id'] = config.topicId
   const credentials = config.credentials?.()
-  if (credentials) headers['Authorization'] = basicAuth(credentials)
+  // Basic credentials are base64, i.e. plain text: never over http to another host.
+  if (credentials && secureFor(config.endpoint)) headers['Authorization'] = basicAuth(credentials)
   return { headers, body }
 }
 
@@ -80,7 +95,8 @@ export function exportGzipBody(config: ExporterConfig, body: Uint8Array, fetchIm
   const headers: Record<string, string> = { 'Content-Type': 'application/x-protobuf', 'Content-Encoding': 'gzip', ...config.headers }
   if (config.topicId) headers['topic_id'] = config.topicId
   const credentials = config.credentials?.()
-  if (credentials) headers['Authorization'] = basicAuth(credentials)
+  // Basic credentials are base64, i.e. plain text: never over http to another host.
+  if (credentials && secureFor(config.endpoint)) headers['Authorization'] = basicAuth(credentials)
   return post(config, { headers, body }, fetchImpl)
 }
 
@@ -95,6 +111,25 @@ export async function exportBatch(config: ExporterConfig, batch: ExportBatch, fe
   return post(config, request, fetchImpl)
 }
 
+/** At most `limit` bytes of a response body (only error messages are read). */
+async function readBounded(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader()
+  if (!reader) return ''
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    while (size < limit) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+      size += value.length
+    }
+  } catch { /* partial body is enough */ } finally {
+    reader.cancel().catch(() => {})
+  }
+  return Buffer.concat(chunks).subarray(0, limit).toString('utf8')
+}
+
 async function post(config: ExporterConfig, request: { headers: Record<string, string>; body: Uint8Array }, fetchImpl: typeof fetch): Promise<ExportResult> {
   try {
     const response = await fetchImpl(config.endpoint, {
@@ -102,8 +137,10 @@ async function post(config: ExporterConfig, request: { headers: Record<string, s
       headers: request.headers,
       body: request.body as unknown as BodyInit,
       signal: AbortSignal.timeout(config.timeoutMs),
+      // A redirect would resend the spans (and, same-origin, the credentials) elsewhere.
+      redirect: 'error',
     })
-    const text = await response.text().catch(() => '')
+    const text = await readBounded(response, MAX_ERROR_BODY * 4)
     return classifyStatus(response.status, text, response.headers.get('retry-after'))
   } catch (error) {
     return { kind: 'retryable', error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) }

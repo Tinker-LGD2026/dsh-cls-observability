@@ -11,9 +11,10 @@
  * `interrupted-tool-result-`, an optional `step/end` with the same timestamp as the event
  * before it, and the final `turn/end{interrupted}`.
  */
-import { appendFileSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import type { SessionEvent } from './dsh-types.ts'
+import { OWNER, ownerAlive } from './outbox.ts'
 
 export interface InterruptedTail {
   turn: number
@@ -62,12 +63,30 @@ export interface ClosedTurns {
   add(key: string): void
 }
 
+/**
+ * Keep an append-only ledger bounded: past `maxBytes`, keep the most recent half (whole
+ * lines). Forgetting old entries can at worst repeat a crash closure, never lose data.
+ */
+export function compactLedger(file: string, maxBytes: number): void {
+  try {
+    if (statSync(file).size <= maxBytes) return
+    const text = readFileSync(file, 'utf8')
+    const tail = text.slice(text.indexOf('\n', text.length - Math.floor(maxBytes / 2)) + 1)
+    const tmp = `${file}.${process.pid}.compact`
+    writeFileSync(tmp, tail, { mode: 0o600 })
+    renameSync(tmp, file)
+  } catch { /* best effort */ }
+}
+
+const LEDGER_MAX_BYTES = 4 * 1024 * 1024
+
 export class ClosedTurnsFile implements ClosedTurns {
   private readonly file: string
   private keys?: Set<string>
 
   constructor(dir: string) {
     this.file = path.join(dir, 'closed-turns')
+    compactLedger(this.file, LEDGER_MAX_BYTES)
   }
 
   has(key: string): boolean {
@@ -127,18 +146,20 @@ export class OpenSpansLedger implements EmittedSpans {
 
   constructor(dir: string) {
     this.dir = dir
-    this.own = path.join(dir, `${OWN_PREFIX}${process.pid}`)
+    this.own = path.join(dir, `${OWN_PREFIX}${OWNER}`)
   }
 
   /** Fold the ledgers of dead processes into the shared file (call once at start). */
-  foldDead(alive: (pid: number) => boolean): void {
+  foldDead(alive: (owner: string, file: string) => boolean = ownerAlive): void {
+    compactLedger(path.join(this.dir, SHARED), LEDGER_MAX_BYTES)
     let entries: string[] = []
     try { entries = readdirSync(this.dir) } catch { return }
     for (const entry of entries) {
       if (!entry.startsWith(OWN_PREFIX)) continue
-      const pid = Number(entry.slice(OWN_PREFIX.length))
-      if (!Number.isInteger(pid) || pid === process.pid || alive(pid)) continue
+      const owner = entry.slice(OWN_PREFIX.length)
+      if (owner === OWNER || owner.endsWith('.tmp')) continue
       const file = path.join(this.dir, entry)
+      if (alive(owner, file)) continue
       try {
         const { open, ended } = parse(readFileSync(file, 'utf8'))
         const lines: string[] = []
@@ -176,7 +197,7 @@ export class OpenSpansLedger implements EmittedSpans {
   /** Clean shutdown: keep only turns still open (DSH closes them on resume). */
   close(): void {
     try {
-      if (this.open.size === 0) rmSync(this.own, { force: true })
+      if (this.open.size === 0) { try { rmSync(this.own, { force: true }) } catch { /* best effort */ } }
       else this.rewrite()
     } catch { /* best effort */ }
   }

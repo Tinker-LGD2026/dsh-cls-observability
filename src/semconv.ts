@@ -100,6 +100,9 @@ export function usageAttributes(usage: TokenUsage | undefined): Attributes {
   }
 }
 
+/** Characters past the kept length still scanned, so a secret cut in half is masked whole. */
+const REDACT_MARGIN = 4096
+
 /** Content filter for one span: redacts secrets, then truncates each field. */
 export class Truncator {
   private readonly maxChars: number
@@ -112,11 +115,36 @@ export class Truncator {
     this.redactor = redactor
   }
   text(value: string): string {
-    const clean = this.redactor ? this.redactor.text(value, this.redacted) : value
-    if (clean.length <= this.maxChars) return clean
+    // Redact only what can be kept (plus a margin, so a secret straddling the cut is still
+    // recognised whole): bounds the work on huge tool output, and nothing past it is sent.
+    const input = this.redactor && value.length > this.maxChars + REDACT_MARGIN ? value.slice(0, this.maxChars + REDACT_MARGIN) : value
+    const clean = this.redactor ? this.redactor.text(input, this.redacted) : value
+    if (clean.length <= this.maxChars && input.length === value.length) return clean
+    if (clean.length <= this.maxChars) {
+      this.truncated = true
+      return `${clean}…[truncated ${value.length - input.length} chars]`
+    }
     this.truncated = true
-    return `${clean.slice(0, this.maxChars)}…[truncated ${clean.length - this.maxChars} chars]`
+    return `${clean.slice(0, this.maxChars)}…[truncated ${clean.length - this.maxChars + value.length - input.length} chars]`
   }
+  /**
+   * Tool-call arguments as text: when they parse as JSON, values under credential-named
+   * keys are masked whole (as on the tool span), then the text is redacted and truncated.
+   */
+  json(raw: string): string {
+    if (this.redactor && raw.length <= 1_000_000 && /^\s*[[{]/.test(raw)) {
+      try {
+        const hits = new Set<string>()
+        const masked = JSON.stringify(this.redactor.value(JSON.parse(raw), hits))
+        if (hits.has('key') && masked !== undefined) {
+          for (const h of hits) this.redacted.add(h)
+          return this.text(masked)
+        }
+      } catch { /* not JSON: plain text below */ }
+    }
+    return this.text(raw)
+  }
+
   /** Redact a structured value (e.g. parsed tool arguments) without truncating it. */
   value(value: unknown): unknown {
     return this.redactor ? this.redactor.value(value, this.redacted) : value
@@ -138,7 +166,7 @@ function blockToPart(block: ContentBlock, t: Truncator): AttrValue {
       return { type: 'reasoning', content: t.text(String((block as { text: string }).text)) }
     case 'tool-call': {
       const b = block as { id: string; name: string; arguments: string }
-      return { type: 'tool_call', id: b.id, name: b.name, arguments: t.text(b.arguments) }
+      return { type: 'tool_call', id: b.id, name: b.name, arguments: t.json(b.arguments) }
     }
     default:
       return { type: String(block.type) }

@@ -12,14 +12,15 @@
  * unacknowledged spans of the segment into regular outbox files.
  */
 import { randomBytes } from 'node:crypto'
-import { closeSync, fdatasyncSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs'
+import { closeSync, fdatasync, fdatasyncSync, futimes, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs'
 import path from 'node:path'
 import { encodeGzipBody } from './exporter.ts'
 import type { Attributes, SpanRecord } from './otlp/types.ts'
-import type { Outbox } from './outbox.ts'
+import { OWNER, type Outbox } from './outbox.ts'
 
 const SUFFIX = '.wal'
 const CLAIM = '.sending-'
+const HEARTBEAT_MS = 60_000
 /** A segment is closed for new spans beyond this size. */
 const SEGMENT_BYTES = 4 * 1024 * 1024
 /** Spans per outbox file written when a journal is recovered. */
@@ -108,7 +109,7 @@ export class Journal {
     }
   }
 
-  /** fsync segments written since the last sync (run on a short timer). */
+  /** fsync segments written since the last sync, synchronously (used before handing off). */
   sync(): void {
     for (const seg of this.dirty) {
       try { fdatasyncSync(seg.fd) } catch { /* best effort */ }
@@ -116,10 +117,31 @@ export class Journal {
     this.dirty.clear()
   }
 
+  /**
+   * The periodic fsync runs on the libuv thread pool: on network or overlay filesystems it
+   * can take tens of milliseconds, which must not stall the host's event loop.
+   */
+  private syncAsync(): void {
+    for (const seg of this.dirty) {
+      // Rotated segments included: they may hold writes made just before rotation.
+      fdatasync(seg.fd, () => { /* best effort; EBADF if the segment was dropped meanwhile */ })
+    }
+    this.dirty.clear()
+  }
+
   /** Start periodic fsync. */
   start(intervalMs = 200): void {
     if (this.timer) return
-    this.timer = setInterval(() => this.sync(), intervalMs)
+    let beat = Date.now()
+    this.timer = setInterval(() => {
+      this.syncAsync()
+      // Heartbeat: an idle host's journal must not look abandoned to a relay in another
+      // PID namespace (claims from other namespaces are judged by file age).
+      if (Date.now() - beat > HEARTBEAT_MS) {
+        beat = Date.now()
+        for (const seg of this.segments) futimes(seg.fd, new Date(), new Date(), () => {})
+      }
+    }, intervalMs)
     this.timer.unref?.()
   }
 
@@ -150,7 +172,7 @@ export class Journal {
 
   private segment(): Segment {
     if (this.current && !this.current.closed) return this.current
-    const name = `${Date.now()}-${process.pid}-${randomBytes(4).toString('hex')}${SUFFIX}${CLAIM}${process.pid}`
+    const name = `${Date.now()}-${process.pid}-${randomBytes(4).toString('hex')}${SUFFIX}${CLAIM}${OWNER}`
     const file = path.join(this.dir, name)
     const seg: Segment = { file, fd: openSync(file, 'a', 0o600), bytes: 0, closed: false, live: new Set() }
     this.segments.add(seg)
@@ -171,7 +193,7 @@ export class Journal {
     this.dirty.delete(seg)
     if (this.current === seg) this.current = undefined
     try { closeSync(seg.fd) } catch { /* already closed */ }
-    rmSync(seg.file, { force: true })
+    try { rmSync(seg.file, { force: true }) } catch { /* best effort: settled spans only */ }
   }
 
   private fail(error: unknown): void {
@@ -192,7 +214,7 @@ export function recoverJournals(outbox: Outbox, log: (message: string) => void =
   let recovered = 0
   for (const entry of entries) {
     const file = path.join(outbox.dir, entry)
-    const claimed = `${file}${CLAIM}${process.pid}`
+    const claimed = `${file}${CLAIM}${OWNER}`
     try { renameSync(file, claimed) } catch { continue }
     try {
       const { header, spans } = readJournal(readFileSync(claimed, 'utf8'))

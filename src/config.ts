@@ -4,6 +4,7 @@
  * (optionally also `$DSH_HOME/.env`), never from a project `.env`, which a
  * cloned repository controls.
  */
+import path from 'node:path'
 import { buildRedactor, secretsFromEnv, type Redactor } from './redact.ts'
 import { readFileSync, statSync } from 'node:fs'
 import type { Credentials } from './exporter.ts'
@@ -46,6 +47,7 @@ export interface AgentObsConfig {
   timeoutMs: number
   shutdownTimeoutMs: number
   maxQueueSpans: number
+  maxQueueBytes: number
   debug: boolean
 }
 
@@ -183,6 +185,9 @@ export function resolveConfig(env: EnvReader, profileName?: string, processEnv: 
       return { enabled: false, reason: 'CLS_AGENTOBS_ENDPOINT must use https (http only for loopback or with CLS_AGENTOBS_ALLOW_HTTP=true)', warnings }
     }
     endpoint = url.toString()
+    if (url.protocol === 'http:' && !isLoopback(url.hostname)) {
+      warnings.push('CLS_AGENTOBS_ENDPOINT uses plain http: credentials are not sent over it (use a relay that adds them, or https)')
+    }
   } else {
     if (!region || !/^[a-z]{2,}-[a-z]+(-[a-z0-9]+)*$/.test(region)) return { enabled: false, reason: 'CLS_AGENTOBS_REGION is required (e.g. ap-shanghai)', warnings }
     endpoint = `https://${region}.cls.${network}.com/v1/traces`
@@ -221,7 +226,13 @@ export function resolveConfig(env: EnvReader, profileName?: string, processEnv: 
   const envSecrets = secretsFromEnv(processEnv)
   let lastCreds: Credentials | undefined
   let knownCache: readonly string[] = envSecrets
+  let checkedAt = 0
   const known = (): readonly string[] => {
+    // Called for every redacted string; a credentials file costs a stat per read, so look
+    // at most once a second.
+    const now = Date.now()
+    if (now - checkedAt < 1_000) return knownCache
+    checkedAt = now
     const c = credentials?.()
     if (c !== lastCreds) {
       lastCreds = c
@@ -231,7 +242,10 @@ export function resolveConfig(env: EnvReader, profileName?: string, processEnv: 
   }
   const redactor = buildRedactor(get('CLS_AGENTOBS_REDACT'), get('CLS_AGENTOBS_REDACT_PATTERNS'), (m) => warnings.push(m), known)
   if (rawMode !== undefined && contentMode === undefined) warnings.push(`unknown content capture mode "${rawMode}"; using truncate`)
-  const dataDir = get('CLS_AGENTOBS_DATA_DIR')
+  const rawDataDir = get('CLS_AGENTOBS_DATA_DIR')
+  // Relative paths would land in the agent's working directory (often a repository).
+  if (rawDataDir && !path.isAbsolute(rawDataDir)) warnings.push(`CLS_AGENTOBS_DATA_DIR must be an absolute path; ignored "${rawDataDir}"`)
+  const dataDir = rawDataDir && path.isAbsolute(rawDataDir) ? rawDataDir : undefined
   const proxy: Record<string, string> = {}
   for (const name of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy']) {
     const value = get(name)
@@ -270,6 +284,7 @@ export function resolveConfig(env: EnvReader, profileName?: string, processEnv: 
       // DSH force-exits 5s after shutdown starts (apps/cli/src/process-shutdown.ts); stay inside it.
       shutdownTimeoutMs: num('CLS_AGENTOBS_SHUTDOWN_TIMEOUT_MS', 3_500, 0, 60_000),
       maxQueueSpans: num('CLS_AGENTOBS_MAX_QUEUE_SPANS', 20_000, 100, 1_000_000),
+      maxQueueBytes: num('CLS_AGENTOBS_MAX_QUEUE_MB', 256, 16, 16_384) * 1024 * 1024,
       debug: truthy(get('CLS_AGENTOBS_DEBUG')),
     },
   }

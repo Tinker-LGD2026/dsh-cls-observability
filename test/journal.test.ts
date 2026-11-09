@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
-import { OpenSpansLedger } from '../src/crash-closure.ts'
+import { compactLedger, OpenSpansLedger } from '../src/crash-closure.ts'
 import { Journal, readJournal, recoverJournals } from '../src/journal.ts'
-import { Outbox } from '../src/outbox.ts'
+import { OWNER, Outbox } from '../src/outbox.ts'
 import { ExportQueue } from '../src/queue.ts'
 import { SpanKind, double, type SpanRecord } from '../src/otlp/types.ts'
 import { decode } from './otlp-schema.ts'
@@ -35,7 +35,7 @@ describe('write-ahead journal', () => {
     const spans = [span(1), span(2), span(3)]
     for (const s of spans) j.append(s)
     const [file] = files(dir, '.wal')
-    expect(file).toMatch(new RegExp(`\\.wal\\.sending-${process.pid}$`))
+    expect(file).toMatch(new RegExp(`\\.wal\\.sending-${process.pid}\\.[A-Za-z0-9-]+$`))
     j.ack([spans[0]!, spans[2]!])
     const { header: h, spans: live } = readJournal(readFileSync(path.join(dir, file!), 'utf8'))
     expect(h).toEqual(header)
@@ -86,7 +86,7 @@ describe('write-ahead journal', () => {
     j.ack(spans.slice(0, 50))
     // Simulate the writer dying: its claim names a pid that no longer exists.
     const [file] = files(dir, '.wal')
-    renameSync(path.join(dir, file!), path.join(dir, file!.replace(/sending-\d+$/, 'sending-999999999')))
+    renameSync(path.join(dir, file!), path.join(dir, file!.replace(/sending-[^/]+$/, `sending-999999999.${OWNER.slice(OWNER.indexOf('.') + 1)}`)))
     expect(outbox.recoverStaleClaims()).toBe(1)
     expect(recoverJournals(outbox)).toBe(550)
     expect(files(dir, '.wal')).toEqual([])
@@ -162,6 +162,19 @@ describe('queue with a journal', () => {
     const [file] = files(dir, '.wal')
     expect(file).toMatch(/\.wal$/)
     expect(readJournal(readFileSync(path.join(dir, file!), 'utf8')).spans).toHaveLength(3)
+  })
+})
+
+describe('ledger compaction', () => {
+  it('keeps the most recent whole lines once a ledger exceeds its bound', () => {
+    const dir = tempDir()
+    const file = path.join(dir, 'closed-turns')
+    writeFileSync(file, Array.from({ length: 1000 }, (_, i) => `session-${i}:t1`).join('\n') + '\n')
+    compactLedger(file, 4000)
+    const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean)
+    expect(lines.at(-1)).toBe('session-999:t1')
+    expect(lines.length).toBeLessThan(200)
+    expect(lines.every((l) => /^session-\d+:t1$/.test(l))).toBe(true)
   })
 })
 

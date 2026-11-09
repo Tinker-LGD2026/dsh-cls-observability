@@ -241,6 +241,7 @@ export class Collector {
     this.attempts.delete(session.id)
     for (const key of this.toolDurations.keys()) if (key.startsWith(`${session.id}|`)) this.toolDurations.delete(key)
     if (tracer) {
+      this.guard('session/disposed', () => tracer.retire())
       this.retired.set(session.id, tracer)
       if (this.retired.size > 256) this.retired.delete(this.retired.keys().next().value!)
     }
@@ -299,43 +300,69 @@ export class Collector {
     let anchor: ReturnType<SessionTracer['auxiliaryAnchor']>
     this.guard('llm/stream', () => { anchor = tracer.auxiliaryAnchor() })
     const source = next()
-    const self = this
     const capture = this.options.builder.captureContent
     const limit = this.options.builder.maxContentChars + 1
-    return (async function* observe() {
-      const startMs = now()
-      let firstTokenMs: number | undefined
-      let usage: TokenUsage | undefined
-      let finish: FinishReason | undefined
-      let text = ''
-      let reasoning = ''
+    const startMs = now()
+    let firstTokenMs: number | undefined
+    let usage: TokenUsage | undefined
+    let finish: FinishReason | undefined
+    let text = ''
+    let reasoning = ''
+    let reported = false
+    const report = () => {
+      if (reported) return
+      reported = true
+      this.guard('llm/stream', () => tracer.onAuxiliary({
+        purpose: String(purpose),
+        provider: String(options.provider),
+        model: String(options.model),
+        startMs,
+        endMs: now(),
+        ...(firstTokenMs !== undefined ? { firstTokenMs } : {}),
+        ...(usage ? { usage } : {}),
+        ...(finish ? { finish } : {}),
+        ...(anchor ? { anchor } : {}),
+        ...(capture ? requestContent(options) : {}),
+        ...(capture && (text || reasoning) ? { output: replyMessage(text, reasoning) } : {}),
+      }))
+    }
+    const observe = (chunk: StreamChunk) => {
       try {
-        for await (const chunk of source) {
-          try {
-            if (firstTokenMs === undefined && isTokenDelta(chunk)) firstTokenMs = now()
-            if (chunk.type === 'usage') usage = chunk.usage
-            else if (chunk.type === 'finish') finish = chunk.reason
-            else if (capture && chunk.type === 'text-delta' && text.length < limit) text += chunk.text
-            else if (capture && chunk.type === 'reasoning-delta' && reasoning.length < limit) reasoning += chunk.text
-          } catch { /* observation only */ }
-          yield chunk
+        if (firstTokenMs === undefined && isTokenDelta(chunk)) firstTokenMs = now()
+        if (chunk.type === 'usage') usage = chunk.usage
+        else if (chunk.type === 'finish') finish = chunk.reason
+        else if (capture && chunk.type === 'text-delta' && text.length < limit) text += chunk.text
+        else if (capture && chunk.type === 'reasoning-delta' && reasoning.length < limit) reasoning += chunk.text
+      } catch { /* observation only */ }
+    }
+    // An explicit iterator, not a generator: every chunk, error, early return() and throw()
+    // from the consumer goes to the provider's stream unchanged (cancelling the request).
+    const iterator = source[Symbol.asyncIterator]()
+    const wrapped: AsyncIterableIterator<StreamChunk> = {
+      [Symbol.asyncIterator]() { return wrapped },
+      async next() {
+        let result: IteratorResult<StreamChunk>
+        try {
+          result = await iterator.next()
+        } catch (error) {
+          report()
+          throw error
         }
-      } finally {
-        self.guard('llm/stream', () => tracer.onAuxiliary({
-          purpose: String(purpose),
-          provider: String(options.provider),
-          model: String(options.model),
-          startMs,
-          endMs: now(),
-          ...(firstTokenMs !== undefined ? { firstTokenMs } : {}),
-          ...(usage ? { usage } : {}),
-          ...(finish ? { finish } : {}),
-          ...(anchor ? { anchor } : {}),
-          ...(capture ? requestContent(options) : {}),
-          ...(capture && (text || reasoning) ? { output: replyMessage(text, reasoning) } : {}),
-        }))
-      }
-    })()
+        if (result.done) report()
+        else observe(result.value)
+        return result
+      },
+      async return(value?: unknown) {
+        report()
+        return iterator.return ? iterator.return(value) : { done: true, value: value as StreamChunk }
+      },
+      async throw(error?: unknown) {
+        report()
+        if (iterator.throw) return iterator.throw(error)
+        throw error
+      },
+    }
+    return wrapped
   }
 
   get activeSessions(): number {

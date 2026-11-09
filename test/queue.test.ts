@@ -1,4 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { classifyStatus } from '../src/exporter.ts'
+import { Outbox } from '../src/outbox.ts'
 import { ExportQueue } from '../src/queue.ts'
 import { SpanKind, type SpanRecord } from '../src/otlp/types.ts'
 
@@ -65,6 +70,59 @@ describe('ExportQueue', () => {
     expect(queue.stats.pending).toBe(1)
     expect(queue.stats.dropped).toBe(0)
     expect(logs.join()).toMatch(/unauthorized/)
+  })
+
+  it('treats 404 (wrong topic) as configuration: keeps every span and sends no per-span retries', async () => {
+    const { queue, logs, calls } = queueWith(() => 404)
+    for (let i = 0; i < 5; i++) queue.push(span(i))
+    expect(await queue.flush(300)).toBe(false)
+    expect(calls()).toBe(1)
+    expect(queue.stats.pending).toBe(5)
+    expect(queue.stats.rejected).toBe(0)
+    expect(logs.join()).toMatch(/destination not found/)
+  })
+
+  it('caps a huge Retry-After instead of overflowing the timer', () => {
+    expect(classifyStatus(429, '', '99999999999')).toMatchObject({ kind: 'retryable', retryAfterMs: 300_000 })
+    expect(classifyStatus(503, '', new Date(Date.now() + 365 * 86_400_000).toUTCString())).toMatchObject({ retryAfterMs: 300_000 })
+  })
+
+  it('spills at exit in files of at most one batch', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'agentobs-q-'))
+    try {
+      const outbox = new Outbox(dir)
+      const fetchImpl = (async () => new Response('', { status: 503 })) as unknown as typeof fetch
+      const queue = new ExportQueue({
+        exporter: { endpoint: 'https://example.test/v1/traces', timeoutMs: 200, gzip: false },
+        resource: {}, scope: { name: 't', version: '1' }, maxBatchSpans: 10, flushIntervalMs: 10_000, maxQueueSpans: 1000,
+        outbox, log: () => {}, fetchImpl,
+      })
+      for (let i = 0; i < 35; i++) queue.push(span(i))
+      const result = await queue.stop(100)
+      expect(result.spilled).toBe(true)
+      expect(outbox.pending()).toHaveLength(4)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('bounds memory by bytes too, moving the oldest spans to the outbox', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'agentobs-qb-'))
+    try {
+      const outbox = new Outbox(dir)
+      const queue = new ExportQueue({
+        exporter: { endpoint: 'https://example.test/v1/traces', timeoutMs: 200, gzip: false },
+        resource: {}, scope: { name: 't', version: '1' }, maxBatchSpans: 10, flushIntervalMs: 10_000, maxQueueSpans: 1000,
+        maxQueueBytes: 50_000, outbox, log: () => {}, fetchImpl: (async () => new Response('', { status: 503 })) as unknown as typeof fetch,
+      })
+      const big = (i: number) => ({ ...span(i), attributes: { 'gen_ai.output.messages': 'x'.repeat(10_000) } })
+      for (let i = 0; i < 20; i++) queue.push(big(i))
+      expect(queue.stats.pending).toBeLessThanOrEqual(5)
+      expect(queue.stats.dropped).toBe(0)
+      expect(queue.stats.spilled).toBe(20 - queue.stats.pending)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('bounds memory by dropping the oldest spans', () => {

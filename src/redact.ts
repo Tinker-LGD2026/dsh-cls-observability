@@ -84,7 +84,8 @@ export const BUILTIN_RULES: readonly RedactionRule[] = [
   },
   {
     name: 'url_credentials',
-    pattern: /\b(?<keep>[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+(?=@)/gi,
+    // Bounded scheme / user parts: unbounded ones backtrack quadratically on `a.a.a…`.
+    pattern: /\b(?<keep>[a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]{1,256}:)[^\s@/]{1,512}(?=@)/gi,
     replace: `$<keep>${mask('url_credentials')}`,
   },
   {
@@ -182,10 +183,9 @@ export class Redactor {
     }
     for (const rule of this.rules) {
       rule.pattern.lastIndex = 0
-      if (!rule.pattern.test(out)) continue
-      rule.pattern.lastIndex = 0
-      out = out.replace(rule.pattern, rule.replace)
-      hits.add(rule.name)
+      const next = out.replace(rule.pattern, rule.replace)
+      if (next !== out) hits.add(rule.name)
+      out = next
     }
     return out
   }

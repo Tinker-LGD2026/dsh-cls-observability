@@ -290,11 +290,11 @@ describe('Collector: closing a turn left open by a crash', () => {
 })
 
 describe('Collector: chat input deltas, restored history, subagent names', () => {
-  function liveSetup() {
+  function liveSetup(captureContent = true) {
     const ctx = new FakeContext()
     const spans: SpanRecord[] = []
     new Collector({
-      builder: { captureContent: true, maxContentChars: 1000, commonAttributes: {} },
+      builder: { captureContent, maxContentChars: 1000, commonAttributes: {}, ...(captureContent ? { redactor: new Redactor(BUILTIN_RULES) } : {}) },
       includeAuxiliary: true,
       sampleRatio: 1,
       emit: (s) => spans.push(s),
@@ -361,6 +361,31 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
     // No session/created: the plugin attached after the session existed.
     turn(ctx, append, 1, 'q', 'a')
     expect((chats(spans)[0]!.attributes['gen_ai.input.messages'] as unknown[]).length).toBe(1)
+  })
+
+  it('keeps model-written text out of names and events when content capture is off', async () => {
+    const { ctx, spans } = liveSetup(false)
+    const parent = liveSession('P8')
+    ctx.emit('session/created', parent.s)
+    parent.append(ctx, 'turn/start', { turn: 1 })
+    parent.append(ctx, 'goal/change', { goal: 'ship the secret project by friday', status: 'active' })
+    parent.append(ctx, 'step/start', { turn: 1, step: 1 })
+    parent.append(ctx, 'tool/call', { turn: 1, step: 1, callId: 'c8', name: 'subagent', arguments: '{}' })
+    const child = liveSession('c8c8c8c8-0000-4000-8000-00000000c8c8', { parentSession: 'P8', origin: 'subagent' })
+    await ctx.waterfall('tools/execute', { callId: 'c8', rootCallId: 'c8', name: 'subagent', agent: { session: parent.s } }, async () => {
+      parent.append(ctx, 'subagent/catalog', { version: 0, childId: child.s.id, childCreatedAt: 0, mode: 'continuable', label: 'Review the acquisition memo' })
+      ctx.emit('session/created', child.s)
+      return {}
+    })
+    turn(ctx, child.append, 1, 'go', 'done')
+    parent.append(ctx, 'step/end', { turn: 1, step: 1 })
+    parent.append(ctx, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const agent = spans.find((x) => kind(x) === 'agent' && x.attributes['gen_ai.agent.id'] === child.s.id)!
+    expect(agent.name).toBe('invoke_agent subagent')
+    expect(agent.attributes['agent.custom.subagent_label']).toBeUndefined()
+    const goal = spans.flatMap((x) => x.events ?? []).find((e) => e.name === 'goal/change')!
+    expect(goal.attributes).toEqual({ status: 'active' })
+    expect(JSON.stringify(spans, (_k, v) => (typeof v === 'bigint' ? String(v) : v))).not.toMatch(/acquisition|secret project/)
   })
 
   it('names a subagent by its creation label when the catalog has no name (DSH 0.2.2-rc.1)', async () => {
@@ -496,6 +521,28 @@ describe('Collector: chat input deltas, restored history, subagent names', () =>
     expect(after['agent.custom.input_delta_reset']).toBe('context_shrank')
     expect((after['gen_ai.input.messages'] as { parts: { content: string }[] }[]).map((m) => m.parts[0]!.content)).toEqual(['summary of 120 turns', 'q121'])
     expect(after['gen_ai.input.messages.hash']).not.toBe(before)
+  })
+
+  it('passes an early stop and errors of the consumer through to the provider stream', async () => {
+    const { ctx, spans } = liveSetup()
+    const { s, append } = liveSession('Z1')
+    ctx.emit('session/created', s)
+    append(ctx, 'turn/start', { turn: 1 })
+    let cancelled = false
+    const options = { provider: 'deepseek', model: 'm', sessionId: 'Z1', purpose: 'compaction' }
+    const stream = await ctx.waterfall('llm/stream', options, () => (async function* () {
+      try {
+        yield { type: 'text-delta', text: 'a' }
+        yield { type: 'text-delta', text: 'b' }
+      } finally { cancelled = true }
+    })())
+    for await (const _ of stream as AsyncIterable<unknown>) break
+    expect(cancelled).toBe(true)
+    expect(spans.filter((x) => x.attributes['agent.custom.llm_purpose'] === 'compaction')).toHaveLength(1)
+
+    const failing = await ctx.waterfall('llm/stream', options, () => (async function* () { throw new Error('provider down') })())
+    await expect((async () => { for await (const _ of failing as AsyncIterable<unknown>) { /* drain */ } })()).rejects.toThrow('provider down')
+    expect(spans.filter((x) => x.attributes['agent.custom.llm_purpose'] === 'compaction')).toHaveLength(2)
   })
 
   it('places an auxiliary call in the round it belongs to', async () => {
