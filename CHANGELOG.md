@@ -3,7 +3,7 @@
 ## 0.1.0 — unreleased (preview)
 
 First release. Exports DeepSeek Harness 0.2.x runs to Tencent Cloud CLS AgentObs as OpenTelemetry traces. Verified
-against the published `@deepseek-ai/dsh@0.2.2-rc.1` on Linux arm64 / x86_64 and macOS.
+against the published `@deepseek-ai/dsh@0.2.2-rc.1` on Linux arm64 / x86_64, macOS, and TKE (Kubernetes 1.36).
 
 ### Traces
 
@@ -26,7 +26,10 @@ against the published `@deepseek-ai/dsh@0.2.2-rc.1` on Linux arm64 / x86_64 and 
 - A turn interrupted by a crash gets its root spans when DSH resumes the session; nothing already sent is repeated.
 - 401 / 403 / 404 pause delivery and keep the data; other 4xx isolate the offending span.
 - Commands: `--selftest` (checks configuration, outbox, credentials and topic without writing data), `--flush`,
-  `--relay`; container entrypoint, Dockerfile snippet and Kubernetes template.
+  `--relay`; examples for containers (Dockerfile lines, a flush-on-exit wrapper) and Kubernetes (Deployment, Job,
+  relay sidecar) — the plugin works however you run DSH.
+- Data left by a killed pod is taken over by the next pod, on any node: claims carry the PID namespace, and a
+  claim from another namespace is abandoned once it has not been refreshed for two minutes.
 
 ### Content and security
 
@@ -42,4 +45,4 @@ against the published `@deepseek-ai/dsh@0.2.2-rc.1` on Linux arm64 / x86_64 and 
 - No temporary (STS) credentials: the CLS AgentObs endpoint documents SecretId / SecretKey only.
 - A crashed session that is never resumed keeps the interrupted turn without its root spans.
 - DSH 0.2.2-rc.1 records no subagent names: the task description is used when content capture is on.
-- `desktop` not verified; the Kubernetes template not yet deployed on a real cluster.
+- `desktop` not verified.

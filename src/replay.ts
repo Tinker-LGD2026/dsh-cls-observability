@@ -18,7 +18,53 @@ function decompress(bytes: Buffer, file: string): string {
   if (!file.endsWith('.zstd') && !file.endsWith('.zst')) return bytes.toString('utf8')
   const zstd = (zlib as unknown as { zstdDecompressSync?: (b: Buffer) => Buffer }).zstdDecompressSync
   if (!zstd) throw new Error('zstd decompression requires Node.js >= 23.8')
-  return zstd(bytes).toString('utf8')
+  // DSH appends one frame per write and Node decodes only the first frame of a buffer:
+  // decode frame by frame. A torn final frame (crash mid-write) is ignored.
+  return zstdFrames(bytes).map(([start, end]) => zstd(bytes.subarray(start, end)).toString('utf8')).join('')
+}
+
+const ZSTD_MAGIC = 0xfd2fb528
+
+/** [start, end) of each complete zstd frame (frame structure only, no decoding). */
+export function zstdFrames(buffer: Buffer): [number, number][] {
+  const frames: [number, number][] = []
+  let offset = 0
+  while (buffer.length - offset >= 4) {
+    const start = offset
+    const magic = buffer.readUInt32LE(offset)
+    offset += 4
+    if ((magic & 0xfffffff0) === 0x184d2a50) {
+      // Skippable frame: 4-byte size, then that many bytes.
+      if (buffer.length - offset < 4) break
+      offset += 4 + buffer.readUInt32LE(offset)
+      if (offset > buffer.length) break
+      continue
+    }
+    if (magic !== ZSTD_MAGIC) throw new Error(`not a zstd frame at byte ${start}`)
+    if (offset >= buffer.length) break
+    const descriptor = buffer.readUInt8(offset++)
+    const contentSizeFlag = descriptor >>> 6
+    const singleSegment = (descriptor & 0x20) !== 0
+    const checksum = (descriptor & 0x04) !== 0
+    const dictionaryFlag = descriptor & 0x03
+    const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag
+    offset += (singleSegment ? 0 : 1) + (dictionaryFlag === 3 ? 4 : dictionaryFlag) + contentSizeBytes
+    let complete = false
+    while (buffer.length - offset >= 3) {
+      const header = buffer.readUIntLE(offset, 3)
+      offset += 3
+      const type = (header >>> 1) & 3
+      if (type === 3) throw new Error(`reserved zstd block type at byte ${offset - 3}`)
+      offset += type === 1 ? 1 : header >>> 3
+      if (offset > buffer.length) break
+      if (header & 1) { complete = true; break }
+    }
+    if (!complete) break
+    if (checksum) offset += 4
+    if (offset > buffer.length) break
+    frames.push([start, offset])
+  }
+  return frames
 }
 
 /**

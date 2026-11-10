@@ -1,0 +1,129 @@
+# Example: what dsh-cls-observability needs in a Kubernetes workload that runs DeepSeek Harness.
+#
+# How you run DSH on Kubernetes is up to you. This file is a minimal working example
+# (verified on TKE 1.36 with CBS disks); the lines marked `# agentobs` are what the
+# plugin needs, everything else stands for your own workload:
+#
+# - the plugin file and its patch in the image (see ../container/Dockerfile.snippet), and
+#   a way for DSH to load the patch (here: copied to $DSH_HOME/cordis.patch.yml at start);
+# - its configuration as environment variables, credentials from a Secret:
+#     kubectl create secret generic cls-credential \
+#       --from-literal=secretId=<SecretId> --from-literal=secretKey=<SecretKey>
+#     (a sub-account limited to cls:UploadLog on the trace topic)
+# - its data directory ($DSH_HOME/agentobs/outbox, or CLS_AGENTOBS_DATA_DIR) on a volume
+#   that a replacement pod mounts again: spans not yet sent when a pod is killed, evicted
+#   or loses its node are then delivered by the next pod, on any node. With emptyDir they
+#   are lost with the pod.
+# - one pod per volume (CBS disks are ReadWriteOnce): a single replica with
+#   strategy: Recreate, or a StatefulSet with volumeClaimTemplates for several replicas;
+# - optional: the wrapper entrypoint (flush when DSH exits) or the `--relay` sidecar.
+#
+# More on failure cases: ../../docs/reliability.md.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dsh-home
+spec:
+  accessModes: [ReadWriteOnce]
+  # storageClassName: cbs                 # TKE cloud disk; its minimum size is 10Gi
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dsh-agent
+spec:
+  replicas: 1
+  strategy: { type: Recreate }            # agentobs: one pod at a time on the volume
+  selector:
+    matchLabels: { app: dsh-agent }
+  template:
+    metadata:
+      labels: { app: dsh-agent }
+    spec:
+      terminationGracePeriodSeconds: 60   # agentobs: covers DSH's shutdown plus the flush
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # Needed by DSH itself, not by the plugin: with the default policy each mount makes
+        # DSH's credentials file group-readable and DSH refuses to start.
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: agentobs-patch            # agentobs: load the plugin in every profile
+          image: <your-dsh-image>
+          command: ["/bin/sh", "-c"]
+          args:
+            - test -f /data/dsh/cordis.patch.yml || cp /opt/dsh-cls-observability/agentobs.patch.yml /data/dsh/cordis.patch.yml
+          volumeMounts:
+            - { name: dsh-home, mountPath: /data/dsh }
+        # agentobs (optional): keeps delivering the shared data directory
+        # (Kubernetes >= 1.29 native sidecar). Delete if not needed.
+        - name: agentobs-relay
+          image: <your-dsh-image>
+          restartPolicy: Always
+          command: ["node", "/opt/dsh-cls-observability/dsh-cls-observability.mjs", "--relay"]
+          env: &agentobs-env
+            - { name: DSH_HOME, value: /data/dsh }
+            - { name: CLS_AGENTOBS_ENABLED, value: "true" }                  # agentobs
+            - { name: CLS_AGENTOBS_REGION, value: ap-shanghai }              # agentobs
+            - { name: CLS_AGENTOBS_NETWORK, value: internal }                # agentobs: same-region intranet endpoint
+            - { name: CLS_AGENTOBS_TOPIC_ID, value: <trace-topic-id> }       # agentobs
+            - name: TENCENTCLOUD_SECRET_ID                                   # agentobs
+              valueFrom: { secretKeyRef: { name: cls-credential, key: secretId } }
+            - name: TENCENTCLOUD_SECRET_KEY                                  # agentobs
+              valueFrom: { secretKeyRef: { name: cls-credential, key: secretKey } }
+            - { name: CLS_AGENTOBS_ENVIRONMENT, value: production }          # agentobs (optional)
+          volumeMounts:
+            - { name: dsh-home, mountPath: /data/dsh }
+      containers:
+        - name: dsh                       # your DSH container, as you run it today
+          image: <your-dsh-image>
+          args: ["dsh", "--profile", "web", "--no-open", "--port", "18080"]
+          env: *agentobs-env
+          volumeMounts:
+            - { name: dsh-home, mountPath: /data/dsh }   # agentobs: data directory on the volume
+      volumes:
+        - name: dsh-home
+          persistentVolumeClaim: { claimName: dsh-home }
+---
+# The same for one task per pod (a Job). Without the relay sidecar, the wrapper entrypoint
+# (../container/entrypoint.sh, set as the image's ENTRYPOINT) delivers what is left when
+# DSH exits.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsh-task
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: dsh
+          image: <your-dsh-image>
+          args: ["dsh", "--profile", "headless", "--patch", "/opt/dsh-cls-observability/agentobs.patch.yml", "<task>"]
+          env:
+            - { name: DSH_HOME, value: /data/dsh }
+            - { name: CLS_AGENTOBS_ENABLED, value: "true" }
+            - { name: CLS_AGENTOBS_REGION, value: ap-shanghai }
+            - { name: CLS_AGENTOBS_NETWORK, value: internal }
+            - { name: CLS_AGENTOBS_TOPIC_ID, value: <trace-topic-id> }
+            - name: TENCENTCLOUD_SECRET_ID
+              valueFrom: { secretKeyRef: { name: cls-credential, key: secretId } }
+            - name: TENCENTCLOUD_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: cls-credential, key: secretKey } }
+          volumeMounts:
+            - { name: dsh-home, mountPath: /data/dsh }
+      volumes:
+        # A ReadWriteOnce volume serves one pod at a time: give concurrent workloads their own claim.
+        - name: dsh-home
+          persistentVolumeClaim: { claimName: dsh-home }

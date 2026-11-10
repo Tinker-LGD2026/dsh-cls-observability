@@ -31,7 +31,7 @@ const started = Date.now()
 const result = spawnSync('docker', [
   'run', '--rm', '--init',
   '-v', `${pkgDir}:/pkg:ro`,
-  '-v', `${path.join(root, 'deploy')}:/pkg-deploy:ro`,
+  '-v', `${path.join(root, 'examples', 'container')}:/pkg-deploy:ro`,
   '-v', `${path.join(root, 'scripts', 'docs-walkthrough.sh')}:/walk.sh:ro`,
   '-v', 'dshcls-linux-dsh:/opt/dsh:ro',
   '-v', 'dshcls-linux-sdk:/work/sdk:ro',

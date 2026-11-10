@@ -11,9 +11,9 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { zstdDecompressSync } from 'node:zlib'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readSessionLog } from '../src/replay.ts'
 import type { StoredSpan } from './cls-api.ts'
 import { devEnv, loadDevSecrets } from './dev-secrets.ts'
 import { outboxOf, verifyRun } from './verify-cls.ts'
@@ -85,9 +85,7 @@ const logs: string[] = []
 const walk = (d: string) => { for (const e of readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else if (/^session\.v\d+\.jsonl(\.zstd)?$/.test(e.name)) logs.push(f) } }
 if (existsSync(path.join(home, 'sessions'))) walk(path.join(home, 'sessions'))
 for (const f of logs) {
-  const raw = readFileSync(f)
-  const text = f.endsWith('.zstd') ? zstdDecompressSync(raw).toString('utf8') : raw.toString('utf8')
-  const events = text.split('\n').filter(Boolean).slice(1).map((l) => JSON.parse(l) as { type: string; seq: number; time: number; data?: { turn?: number; reason?: { kind?: string }; message?: { id?: string } } })
+  const events = readSessionLog(f).events as unknown as { type: string; seq: number; time: number; data?: { turn?: number; reason?: { kind?: string }; message?: { id?: string } } }[]
   console.log(`session log ${path.basename(path.dirname(f)).slice(-12)}: ${events.length} events; around the crash:`)
   const end1 = events.findIndex((e) => e.type === 'turn/start' && e.data?.turn === 2)
   for (const e of events.slice(Math.max(0, (end1 < 0 ? events.length : end1) - 8), end1 < 0 ? undefined : end1 + 1)) {

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Container entrypoint for DeepSeek Harness with dsh-cls-observability.
+# Example wrapper for environments that end together with DSH (a container, a CI job).
 #
-# Runs DSH as a child, forwards SIGTERM / SIGINT to it, and after DSH exits delivers
-# whatever is still in the outbox (`--flush`) before the container stops. Without
-# this, a container ends the moment DSH exits and the plugin's detached deliverer is
-# killed with it; anything undelivered would wait for the next start on the same volume.
+# Runs your command — DSH itself, or whatever starts it — as a child, forwards SIGTERM /
+# SIGINT to it, and after it exits delivers what the plugin has not sent yet (`--flush`).
+# Without this, the environment ends the moment its main process exits and the plugin's
+# background deliverer ends with it; unsent spans then wait on disk for the next start
+# on the same directory, or are lost if the directory goes too.
 #
 #   entrypoint.sh dsh --profile headless "run the tests"
+#   entrypoint.sh /your/existing/entrypoint --your-flags
 #
 # Environment:
 #   AGENTOBS_PLUGIN        plugin file (default /opt/dsh-cls-observability/dsh-cls-observability.mjs)

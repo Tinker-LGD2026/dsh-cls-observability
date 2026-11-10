@@ -11,7 +11,7 @@
  * claims left by dead processes are released on the next start.
  */
 import { randomBytes } from 'node:crypto'
-import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import path from 'node:path'
 
@@ -50,13 +50,19 @@ const NAMESPACE = (() => {
   return hostname().replace(/[^A-Za-z0-9-]/g, '').slice(0, 40) || 'host'
 })()
 export const OWNER = `${process.pid}.${NAMESPACE}`
-/** A claim from another namespace untouched this long is taken as abandoned. */
-export const FOREIGN_STALE_MS = 10 * 60_000
+/**
+ * A claim from another namespace untouched this long is taken as abandoned. Live holders
+ * keep theirs fresh: journals are touched every HEARTBEAT_MS, outbox claims are refreshed
+ * when taken and last one request. Short, because a pod replacing a killed one can only
+ * tell by age that the data it finds on the volume has no owner any more.
+ */
+export const FOREIGN_STALE_MS = 2 * 60_000
+export const HEARTBEAT_MS = 30_000
 
 /**
  * Whether the owner of a claim may still be working on it. Same namespace: the pid is
- * checked. Another namespace: alive while the file was touched recently (live hosts touch
- * their journals every minute).
+ * checked. Another namespace: alive while the file was touched recently (live holders
+ * refresh it every HEARTBEAT_MS).
  */
 export function ownerAlive(tag: string, file: string): boolean {
   const dot = tag.indexOf('.')
@@ -142,6 +148,8 @@ export class Outbox {
     const claimed = `${file}${CLAIM}${OWNER}`
     try {
       renameSync(file, claimed)
+      // rename keeps the old mtime: an old file just claimed must not look abandoned.
+      try { const now = new Date(); utimesSync(claimed, now, now) } catch { /* best effort */ }
       return claimed
     } catch {
       return undefined

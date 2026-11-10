@@ -38,6 +38,12 @@ if [ -n "$platform" ]; then
   # Install scripts run on the target in the rebuild step below.
   npm_target=(-e "npm_config_cpu=$npm_cpu" -e npm_config_os=linux -e npm_config_libc=glibc -e npm_config_ignore_scripts=true)
 fi
+# NPM_REGISTRY=<url>: install from another registry than the one recorded in package-lock.json
+# (e.g. when that mirror is down).
+registry_args=()
+if [ -n "${NPM_REGISTRY:-}" ]; then
+  registry_args=(-e "npm_config_registry=$NPM_REGISTRY" -e npm_config_replace_registry_host=always)
+fi
 docker volume create "dshcls-linux-dsh$suffix" >/dev/null
 docker volume create "dshcls-linux-nm$suffix" >/dev/null
 docker volume create "dshcls-linux-sdk$suffix" >/dev/null
@@ -49,6 +55,7 @@ docker run --rm \
   -v "dshcls-linux-nm$suffix:/work/plugin/node_modules" \
   -v "dshcls-linux-sdk$suffix:/work/sdk" \
   ${npm_target[@]+"${npm_target[@]}"} \
+  ${registry_args[@]+"${registry_args[@]}"} \
   -e DSH_VERSION="$dsh_version" \
   -w /work/plugin \
   "$image" bash -c '

@@ -1,0 +1,37 @@
+# Example: add dsh-cls-observability to YOUR existing DeepSeek Harness image.
+#
+# Paste these lines into the Dockerfile that already builds your DSH image (`node` and
+# `npm` available). They add the plugin file, a patch that loads it, and an optional
+# wrapper script; they do not change how your image runs DSH. No credentials go into the
+# image: they come from the runtime environment.
+#
+#   docker build --build-arg AGENTOBS_VERSION=0.1.0 --build-arg AGENTOBS_SHA256=<published sha256> .
+#
+# Without registry access: `COPY dsh-cls-observability-0.1.0.tgz /tmp/` before the RUN below
+# and pass --build-arg AGENTOBS_PACKAGE=/tmp/dsh-cls-observability-0.1.0.tgz.
+
+ARG AGENTOBS_VERSION=0.1.0
+ARG AGENTOBS_SHA256=
+ARG AGENTOBS_PACKAGE=dsh-cls-observability@${AGENTOBS_VERSION}
+
+# The plugin file, verified against the published checksum when one is given.
+RUN mkdir -p /opt/dsh-cls-observability \
+ && cd /opt/dsh-cls-observability \
+ && npm pack "$AGENTOBS_PACKAGE" --silent \
+ && tar -xzf "dsh-cls-observability-${AGENTOBS_VERSION}.tgz" --strip-components=2 package/dist/dsh-cls-observability.mjs \
+ && rm -f ./*.tgz \
+ && if [ -n "$AGENTOBS_SHA256" ]; then echo "$AGENTOBS_SHA256  dsh-cls-observability.mjs" | sha256sum -c -; fi
+
+# A patch that loads the plugin. Use it the way that suits how you start DSH:
+#   - `dsh ... --patch /opt/dsh-cls-observability/agentobs.patch.yml ...` (before the app's own arguments);
+#   - copy it to $DSH_HOME/cordis.patch.yml at start (every profile loads it);
+#   - `patches: [...]` when your program starts DSH through the TypeScript SDK.
+RUN printf -- '- insert:\n    - id: cls-agentobs\n      name: /opt/dsh-cls-observability/dsh-cls-observability.mjs\n' \
+      > /opt/dsh-cls-observability/agentobs.patch.yml
+
+# Optional: a wrapper that runs your command, then delivers what the plugin has not sent
+# yet before the container stops (see entrypoint.sh). Put it in front of your own
+# ENTRYPOINT, e.g. ENTRYPOINT ["/opt/dsh-cls-observability/entrypoint.sh", "/your/entrypoint"];
+# your CMD stays as it is.
+COPY entrypoint.sh /opt/dsh-cls-observability/entrypoint.sh
+RUN chmod 0755 /opt/dsh-cls-observability/entrypoint.sh

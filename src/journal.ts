@@ -12,15 +12,14 @@
  * unacknowledged spans of the segment into regular outbox files.
  */
 import { randomBytes } from 'node:crypto'
-import { closeSync, fdatasync, fdatasyncSync, futimes, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync } from 'node:fs'
+import { closeSync, fdatasync, fdatasyncSync, futimes, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeSync } from 'node:fs'
 import path from 'node:path'
 import { encodeGzipBody } from './exporter.ts'
 import type { Attributes, SpanRecord } from './otlp/types.ts'
-import { OWNER, type Outbox } from './outbox.ts'
+import { HEARTBEAT_MS, OWNER, type Outbox } from './outbox.ts'
 
 const SUFFIX = '.wal'
 const CLAIM = '.sending-'
-const HEARTBEAT_MS = 60_000
 /** A segment is closed for new spans beyond this size. */
 const SEGMENT_BYTES = 4 * 1024 * 1024
 /** Spans per outbox file written when a journal is recovered. */
@@ -216,6 +215,7 @@ export function recoverJournals(outbox: Outbox, log: (message: string) => void =
     const file = path.join(outbox.dir, entry)
     const claimed = `${file}${CLAIM}${OWNER}`
     try { renameSync(file, claimed) } catch { continue }
+    try { const now = new Date(); utimesSync(claimed, now, now) } catch { /* best effort */ }
     try {
       const { header, spans } = readJournal(readFileSync(claimed, 'utf8'))
       let ok = true

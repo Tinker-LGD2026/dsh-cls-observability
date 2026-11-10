@@ -37,10 +37,11 @@
     "dist",
     "README.md",
     "README.zh-CN.md",
-    "deploy",
+    "examples",
     "LICENSE",
     "SECURITY.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -55,6 +56,7 @@
     "e2e:crash": "node scripts/e2e-crash.ts",
     "e2e:compaction": "node scripts/e2e.ts --compaction",
     "trial:docker-web": "node scripts/docker-web.ts",
+    "verify:tke": "node scripts/tke-verify.ts",
     "verify:docs": "node scripts/docs-walkthrough.ts",
     "verify:linux": "scripts/linux-verify.sh test e2e ptc web crash compaction sdk sdk-minimal acp nested",
     "verify:linux-amd64": "LINUX_PLATFORM=linux/amd64 scripts/linux-verify.sh e2e ptc crash compaction sdk acp nested",

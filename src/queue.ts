@@ -52,6 +52,7 @@ const MIN_BACKOFF_MS = 1_000
 const MAX_BACKOFF_MS = 60_000
 const AUTH_PAUSE_MS = 5 * 60_000
 const SPILL_FILE_BYTES = 4 * 1024 * 1024
+const RECOVERY_INTERVAL_MS = 60_000
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms).unref?.())
@@ -142,17 +143,12 @@ export class ExportQueue {
     if (this.running) return
     this.running = true
     if (this.options.outbox) {
-      const released = this.options.outbox.recoverStaleClaims()
-      if (released > 0) this.options.log('debug', `released ${released} stale outbox claims`)
-      // Journals of dead processes are read and re-encoded after the host has started,
-      // not inside its plugin setup.
-      const outbox = this.options.outbox
-      setImmediate(() => {
-        try {
-          const recovered = recoverJournals(outbox, (m) => this.options.log('debug', m))
-          if (recovered > 0) this.options.log('debug', `recovered ${recovered} spans journaled by an earlier process`)
-        } catch { /* best effort: the next start or a deliverer retries */ }
-      }).unref?.()
+      // After the host has started, not inside its plugin setup; then periodically: data a
+      // killed process in another PID namespace left (a replaced pod) can only be taken
+      // over once its claims have aged, which is after this host started.
+      setImmediate(() => this.recoverAbandoned()).unref?.()
+      this.recoveryTimer = setInterval(() => this.recoverAbandoned(), RECOVERY_INTERVAL_MS)
+      this.recoveryTimer.unref?.()
     }
     this.options.journal?.start()
     void this.loop()
@@ -164,6 +160,21 @@ export class ExportQueue {
       this.timer.unref?.()
       this.wake = () => { clearTimeout(this.timer); this.wake = undefined; resolve() }
     })
+  }
+
+  private recoveryTimer?: ReturnType<typeof setInterval>
+
+  /** Release claims of processes that are gone and turn their journals into outbox files. */
+  private recoverAbandoned(): void {
+    const outbox = this.options.outbox
+    if (!outbox || this.stopped) return
+    try {
+      const released = outbox.recoverStaleClaims()
+      if (released > 0) this.options.log('debug', `released ${released} stale outbox claims`)
+      const recovered = recoverJournals(outbox, (m) => this.options.log('debug', m))
+      if (recovered > 0) this.options.log('debug', `recovered ${recovered} spans journaled by an earlier process`)
+      if (released > 0 || recovered > 0) this.wake?.()
+    } catch { /* best effort: retried on the next interval */ }
   }
 
   private async loop(): Promise<void> {
@@ -369,6 +380,7 @@ export class ExportQueue {
   async stop(timeoutMs: number, onSpill?: () => boolean | void): Promise<StopResult> {
     this.running = false
     if (this.eagerTimer) clearTimeout(this.eagerTimer)
+    if (this.recoveryTimer) clearInterval(this.recoveryTimer)
     this.wake?.()
     const outbox = this.options.outbox
     let spilled = false

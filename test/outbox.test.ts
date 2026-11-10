@@ -174,6 +174,19 @@ describe('outbox', () => {
     expect(OWNER).toMatch(new RegExp(`^${process.pid}\\.`))
   })
 
+  it('refreshes the age of a file it claims, so an old file just claimed is not taken from it', () => {
+    const dir = tempDir()
+    const outbox = new Outbox(dir)
+    const file = outbox.spillSync(new Uint8Array([1]))!
+    const old = new Date(Date.now() - FOREIGN_STALE_MS - 60_000)
+    utimesSync(file, old, old)
+    const claimed = outbox.claim(file)!
+    // As another namespace sees it: same pid, other namespace tag.
+    const foreign = claimed.replace(/sending-[^/]+$/, `sending-${process.pid}.4026539999`)
+    renameSync(claimed, foreign)
+    expect(outbox.recoverStaleClaims()).toBe(0)
+  })
+
   it('refuses an outbox directory it does not own or that is a symlink, and closes a world-readable one', () => {
     const base = tempDir()
     const real = path.join(base, 'real')
