@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — 2026-11-10 (preview)
+
+No change to the plugin's behavior: the plugin file differs from 0.1.0 only in its version.
+
+- Docs: [Kubernetes from scratch](docs/kubernetes.md) ([简体中文](docs/kubernetes.zh-CN.md)) — build an image, try it
+  locally, run a Job and a web Deployment on TKE, find the trace in CLS; run as written on TKE (Kubernetes 1.36).
+- Examples: `Dockerfile.snippet` defaults to 0.1.1.
+- Releases are published from GitHub Actions with npm trusted publishing (OIDC), with provenance.
+
 ## 0.1.0 — 2026-11-10 (preview)
 
 First release. Exports DeepSeek Harness 0.2.x runs to Tencent Cloud CLS AgentObs as OpenTelemetry traces. Verified

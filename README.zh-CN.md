@@ -10,7 +10,7 @@
 - **不影响 DSH**：插件内部错误不会传给 DSH；发送在后台进行；内存和磁盘占用都有上限；配置只读真实进程环境，克隆来的仓库里的 `.env` 无法开启采集或改写上报地址。
 - **内容由你掌控**：默认采集消息与工具内容（截断），离开本机前先对密钥脱敏；也可以关闭内容采集，只上报结构、耗时与用量。
 
-> 状态：0.1.0 预览版，已在 DSH 0.2.2-rc.1 上验证。暂不支持：临时密钥（STS，CLS 上报接口只接受 SecretId / SecretKey）；崩溃后从未续跑的会话，被打断的那一轮缺少顶层 Span。
+> 状态：0.1.1 预览版，已在 DSH 0.2.2-rc.1 上验证。暂不支持：临时密钥（STS，CLS 上报接口只接受 SecretId / SecretKey）；崩溃后从未续跑的会话，被打断的那一轮缺少顶层 Span。
 
 ## 运行要求
 
@@ -89,6 +89,8 @@ const harness = new DeepSeekHarness({
 | 短时环境（CI 任务、Serverless、临时沙箱） | 任务环境变量、密钥管理 | 随环境一起丢弃 | 最后一步运行 `--flush`；被强制结束时没送达的数据会丢失 |
 
 我们实际验证过的：工作站（Linux、macOS）、SDK、容器、Kubernetes（TKE）。systemd 与短时环境两行基于同样的机制推导，尚未端到端实测。
+
+第一次在 Kubernetes 上部署？[docs/kubernetes.zh-CN.md](docs/kubernetes.zh-CN.md) 从零开始带你走一遍：做镜像、本机试跑、在 TKE 上跑 Job 和网页版 Deployment，最后到 CLS 里找到 Trace。
 
 [`examples/`](examples) 下是示例，请按你的实际部署调整：
 

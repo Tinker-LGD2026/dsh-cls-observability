@@ -5,12 +5,12 @@
 # wrapper script; they do not change how your image runs DSH. No credentials go into the
 # image: they come from the runtime environment.
 #
-#   docker build --build-arg AGENTOBS_VERSION=0.1.0 --build-arg AGENTOBS_SHA256=<published sha256> .
+#   docker build --build-arg AGENTOBS_VERSION=0.1.1 --build-arg AGENTOBS_SHA256=<published sha256> .
 #
-# Without registry access: `COPY dsh-cls-observability-0.1.0.tgz /tmp/` before the RUN below
-# and pass --build-arg AGENTOBS_PACKAGE=/tmp/dsh-cls-observability-0.1.0.tgz.
+# Without registry access: `COPY dsh-cls-observability-0.1.1.tgz /tmp/` before the RUN below
+# and pass --build-arg AGENTOBS_PACKAGE=/tmp/dsh-cls-observability-0.1.1.tgz.
 
-ARG AGENTOBS_VERSION=0.1.0
+ARG AGENTOBS_VERSION=0.1.1
 ARG AGENTOBS_SHA256=
 ARG AGENTOBS_PACKAGE=dsh-cls-observability@${AGENTOBS_VERSION}
 
