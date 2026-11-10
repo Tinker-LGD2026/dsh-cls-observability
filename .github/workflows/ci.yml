@@ -42,4 +42,4 @@ jobs:
       - name: The bundle loads and has no runtime dependencies
         run: |
           node -e "import('./dist/dsh-cls-observability.mjs').then((m) => { if (typeof m.apply !== 'function') process.exit(1) })"
-          CLS_AGENTOBS_ENABLED=false node dist/dsh-cls-observability.mjs --selftest; test $? -eq 1
+          code=0; CLS_AGENTOBS_ENABLED=false node dist/dsh-cls-observability.mjs --selftest || code=$?; test "$code" -eq 1
