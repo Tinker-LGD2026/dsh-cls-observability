@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: write
-  id-token: write # npm provenance
+  id-token: write # npm trusted publishing and provenance
 
 jobs:
   release:
@@ -39,10 +39,9 @@ jobs:
           DSH_REPO: ${{ github.workspace }}/deepseek-harness
       - run: npm run build
 
+      # npm trusted publishing (OIDC, npm >= 11.5.1): no token; provenance is automatic.
       - name: Publish to npm
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: GitHub release with the plugin file and its checksum
         env:
