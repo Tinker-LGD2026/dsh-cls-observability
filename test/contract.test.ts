@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { readSessionLog, replaySession, replaySessionGroup } from '../src/replay.ts'
 import { BUILTIN_RULES, Redactor } from '../src/redact.ts'
 import { fromRecord, validateSpans } from '../src/spec-check.ts'
+import { catalogEntry } from '../src/trace-builder.ts'
 import type { SpanRecord } from '../src/otlp/types.ts'
 import { fromSpan, renderTree as renderNodes } from '../src/tree.ts'
 
@@ -199,7 +200,8 @@ describe.skipIf(logs.length === 0)('chat input deltas and subagent names (groupe
     expect(resets.has('prefix_changed') || resets.has('context_shrank')).toBe(true)
   })
 
-  it('names subagents by their catalog name', () => {
+  // Newer DSH records a reserved `name`; 0.2.2-rc.1 records only the creation `label`.
+  it('names subagents by their catalog name, else their label', () => {
     let named = 0
     for (const files of groups.values()) {
       const sessionLogs = files.map(readSessionLog)
@@ -208,11 +210,13 @@ describe.skipIf(logs.length === 0)('chat input deltas and subagent names (groupe
         if (log.header.origin !== 'subagent') return
         const parent = sessionLogs.find((l) => l.header.id === log.header.parentSession)
         const catalog = parent?.events.find((e) => e.type === 'subagent/catalog' && e.data.childId === log.header.id)
+        const entry = catalog ? catalogEntry(catalog.data) : undefined
+        const expected = entry?.name ?? entry?.label
         for (const s of results[i]!.filter((x) => kindOf(x) === 'agent')) {
-          if (!catalog) continue
+          if (!expected) continue
           named++
-          expect(s.attributes['gen_ai.agent.name']).toBe(catalog.data.name)
-          expect(s.name).toBe(`invoke_agent ${String(catalog.data.name)}`)
+          expect(s.attributes['gen_ai.agent.name']).toBe(expected)
+          expect(s.name).toBe(`invoke_agent ${expected}`)
         }
         // Every span of the subagent belongs to the task that spawned it.
         const roots = sessionLogs.filter((l) => l.header.origin !== 'subagent').map((l) => l.header.id)
