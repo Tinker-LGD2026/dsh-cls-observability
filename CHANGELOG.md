@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased (preview)
+## 0.1.0 — 2026-11-10 (preview)
 
 First release. Exports DeepSeek Harness 0.2.x runs to Tencent Cloud CLS AgentObs as OpenTelemetry traces. Verified
 against the published `@deepseek-ai/dsh@0.2.2-rc.1` on Linux arm64 / x86_64, macOS, and TKE (Kubernetes 1.36).
