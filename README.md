@@ -22,7 +22,7 @@ follow every task, turn, model call and tool call with its token usage, latency,
 - **You control the content.** Message and tool content is captured (truncated) and secrets are masked before it leaves
   the machine; switch content off to send structure, timing and usage only.
 
-> Status: 0.1.1 preview, verified with DSH 0.2.2-rc.1. Not supported yet: temporary (STS) credentials (the CLS
+> Status: 0.1.2 preview, verified with DSH 0.2.2-rc.1. Not supported yet: temporary (STS) credentials (the CLS
 > endpoint accepts SecretId / SecretKey only); turns of a crashed session that is never resumed stay without their
 > top-level spans.
 

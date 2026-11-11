@@ -2,19 +2,19 @@
 
 [English](kubernetes.md)
 
-- 适用版本：DSH `0.2.2-rc.1`，插件 `dsh-cls-observability` `0.1.1`
+- 适用版本：DSH `0.2.2-rc.1`，插件 `dsh-cls-observability` `0.1.2`
 - 示例环境：腾讯云 TKE（x86_64 节点）+ CLS 上海地域
 
 本教程以一个具体任务为例，从零开始完成全部步骤：做镜像，在本机试跑，在 K8s 上跑一次性任务（Job），到 CLS 里查看结果；进阶部分是长期运行的网页版（Deployment）。
 
 **实测情况（2026-11-11）**：从本教程原文提取 Dockerfile 和 YAML，只替换镜像地址和主题 ID，在 TKE（Kubernetes 1.36，x86_64 节点，`cbs` 云硬盘）上执行：
 
-- 镜像：按第 2 节构建，插件 0.1.1 的 SHA-256 校验通过。
+- 镜像：按第 2 节构建，插件 0.1.2 的 SHA-256 校验通过。
 - Job：日志里有模型回答和 `0 left`；CLS 中 1 条 Trace、5 个 Span，没有重复，也没有找不到父节点的 Span，入口类型为 `cli`。
 - Deployment：通过 `kubectl port-forward` 在网页版发起任务；CLS 中 1 条 Trace、5 个 Span，入口类型为 `web`。
 - 第 9 节的结论在同一集群上单独实测。
 
-TKE 上运行的镜像所带插件为 0.1.0，代码与 0.1.1 相同。
+TKE 上运行的镜像所带插件为 0.1.0，代码与 0.1.2 相同。
 
 **接入插件只需要四样东西：镜像里的插件文件和一个 patch、环境变量、密钥、一块盘。** 插件不要求改动 DSH 的任何其他设置，包括沙箱和权限。DSH 怎么执行工具，由你自己的 Agent 决定，和插件无关；如果你的 Agent 要在容器里执行命令，见[第 9 节](#9-如果你的-agent-要在容器里执行命令)。
 
@@ -118,8 +118,8 @@ RUN cd /opt/dsh && npm rebuild
 ENV PATH=/opt/dsh/node_modules/.bin:$PATH
 
 # 插件：从 npm 下载，按发布的 SHA-256 校验；顺带取出包里的包装脚本 entrypoint.sh。
-ARG AGENTOBS_VERSION=0.1.1
-ARG AGENTOBS_SHA256=6d1e7287f7e641b589df953d4d715952fae852eff162653afebbfe5860651796
+ARG AGENTOBS_VERSION=0.1.2
+ARG AGENTOBS_SHA256=6ff896c59f3e606433b27b2c11c37f64e962237034f264d5d5ae3ef7751d0b37
 RUN mkdir -p /opt/dsh-cls-observability && cd /tmp \
  && npm pack "dsh-cls-observability@${AGENTOBS_VERSION}" --silent \
  && tar -xzf "dsh-cls-observability-${AGENTOBS_VERSION}.tgz" \
@@ -158,7 +158,7 @@ ENTRYPOINT ["/opt/dsh-cls-observability/entrypoint.sh"]
 cd dsh-image
 docker login ccr.ccs.tencentyun.com
 docker buildx build --platform linux/amd64 \
-  -t ccr.ccs.tencentyun.com/<命名空间>/dsh-agentobs:0.1.1 \
+  -t ccr.ccs.tencentyun.com/<命名空间>/dsh-agentobs:0.1.2 \
   --push .
 ```
 
@@ -181,7 +181,7 @@ export CLS_AGENTOBS_TOPIC_ID=<你的 Trace 主题 ID>
 read -rs -p 'SecretId: '  TENCENTCLOUD_SECRET_ID  && echo && export TENCENTCLOUD_SECRET_ID
 read -rs -p 'SecretKey: ' TENCENTCLOUD_SECRET_KEY && echo && export TENCENTCLOUD_SECRET_KEY
 read -rs -p 'DeepSeek API Key: ' DEEPSEEK_API_KEY && echo && export DEEPSEEK_API_KEY
-IMG=ccr.ccs.tencentyun.com/<命名空间>/dsh-agentobs:0.1.1
+IMG=ccr.ccs.tencentyun.com/<命名空间>/dsh-agentobs:0.1.2
 ```
 
 `docker run -e 名字` 只写名字、不写值时，会把当前终端里的同名变量传进容器，所以密钥不会出现在命令里。

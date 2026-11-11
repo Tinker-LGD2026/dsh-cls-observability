@@ -2,19 +2,19 @@
 
 [简体中文](kubernetes.zh-CN.md)
 
-- Versions: DSH `0.2.2-rc.1`, plugin `dsh-cls-observability` `0.1.1`
+- Versions: DSH `0.2.2-rc.1`, plugin `dsh-cls-observability` `0.1.2`
 - Example environment: Tencent Cloud TKE (x86_64 nodes) + CLS in `ap-shanghai`
 
 This walkthrough takes one concrete task from nothing to a trace: build an image, try it locally, run a one-off task on Kubernetes (a Job), and look at the result in CLS. The advanced part runs the DSH web UI as a long-running Deployment.
 
 **Tested (2026-11-11)**: the Dockerfile and YAML were extracted from this document as written, with only the image address and topic id filled in, and run on TKE (Kubernetes 1.36, x86_64 nodes, `cbs` disks):
 
-- Image: built as in section 2; the plugin 0.1.1 checksum matched.
+- Image: built as in section 2; the plugin 0.1.2 checksum matched.
 - Job: the log shows the model's answer and `0 left`; CLS has 1 trace with 5 spans, no duplicates, no orphans, entry type `cli`.
 - Deployment: a task started in the web UI over `kubectl port-forward`; CLS has 1 trace with 5 spans, entry type `web`.
 - The findings in section 9 were tested separately on the same cluster.
 
-The image run on TKE carried plugin 0.1.0, whose code is the same as 0.1.1.
+The image run on TKE carried plugin 0.1.0, whose code is the same as 0.1.2.
 
 **Using the plugin takes four things: the plugin file and one patch in the image, environment variables, credentials, and a disk.** The plugin needs no other change to DSH's settings, sandbox and permissions included. How DSH runs tools is up to your agent and unrelated to the plugin; if your agent runs commands inside the container, see [section 9](#9-if-your-agent-runs-commands-in-the-container).
 
@@ -119,8 +119,8 @@ RUN cd /opt/dsh && npm rebuild
 ENV PATH=/opt/dsh/node_modules/.bin:$PATH
 
 # The plugin, from npm, checked against the published SHA-256; plus the package's entrypoint.sh wrapper.
-ARG AGENTOBS_VERSION=0.1.1
-ARG AGENTOBS_SHA256=6d1e7287f7e641b589df953d4d715952fae852eff162653afebbfe5860651796
+ARG AGENTOBS_VERSION=0.1.2
+ARG AGENTOBS_SHA256=6ff896c59f3e606433b27b2c11c37f64e962237034f264d5d5ae3ef7751d0b37
 RUN mkdir -p /opt/dsh-cls-observability && cd /tmp \
  && npm pack "dsh-cls-observability@${AGENTOBS_VERSION}" --silent \
  && tar -xzf "dsh-cls-observability-${AGENTOBS_VERSION}.tgz" \
@@ -159,7 +159,7 @@ With Tencent Container Registry (personal edition) as the example (replace `<nam
 cd dsh-image
 docker login ccr.ccs.tencentyun.com
 docker buildx build --platform linux/amd64 \
-  -t ccr.ccs.tencentyun.com/<namespace>/dsh-agentobs:0.1.1 \
+  -t ccr.ccs.tencentyun.com/<namespace>/dsh-agentobs:0.1.2 \
   --push .
 ```
 
@@ -182,7 +182,7 @@ export CLS_AGENTOBS_TOPIC_ID=<your trace topic id>
 read -rs -p 'SecretId: '  TENCENTCLOUD_SECRET_ID  && echo && export TENCENTCLOUD_SECRET_ID
 read -rs -p 'SecretKey: ' TENCENTCLOUD_SECRET_KEY && echo && export TENCENTCLOUD_SECRET_KEY
 read -rs -p 'DeepSeek API Key: ' DEEPSEEK_API_KEY && echo && export DEEPSEEK_API_KEY
-IMG=ccr.ccs.tencentyun.com/<namespace>/dsh-agentobs:0.1.1
+IMG=ccr.ccs.tencentyun.com/<namespace>/dsh-agentobs:0.1.2
 ```
 
 `docker run -e NAME` without a value passes your shell's variable of that name, so no credential appears on the command line.

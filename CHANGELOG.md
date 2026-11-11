@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — 2026-11-11 (preview)
+
+No change to the plugin's behavior: the plugin file differs from 0.1.1 only in its version.
 
 - Docs: the Kubernetes walkthrough no longer turns off DSH's command sandbox. Using the plugin needs no change to
   DSH's sandbox or permissions; the main flow is the plugin file, its patch, environment, credentials and a disk.
