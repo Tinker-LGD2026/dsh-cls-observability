@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Docs: the Kubernetes walkthrough no longer turns off DSH's command sandbox. Using the plugin needs no change to
+  DSH's sandbox or permissions; the main flow is the plugin file, its patch, environment, credentials and a disk.
+  A separate section covers agents that run commands inside the container (DSH's own behavior, unrelated to the
+  plugin): the error DSH gives when no sandbox is usable, tested results on TKE and local Docker, and the options
+  (remote sandbox, or the container as the isolation boundary) with their risks.
+
 ## 0.1.1 — 2026-11-10 (preview)
 
 No change to the plugin's behavior: the plugin file differs from 0.1.0 only in its version.

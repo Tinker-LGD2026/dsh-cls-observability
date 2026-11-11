@@ -7,13 +7,16 @@
 
 本教程以一个具体任务为例，从零开始完成全部步骤：做镜像，在本机试跑，在 K8s 上跑一次性任务（Job），到 CLS 里查看结果；进阶部分是长期运行的网页版（Deployment）。
 
-**实测情况**：从本教程原文提取 Dockerfile、patch 和 YAML，只替换镜像地址和主题 ID 两个占位符，在 TKE（Kubernetes 1.36，x86_64 节点，`cbs` 云硬盘）上执行，全部通过：
+**实测情况（2026-11-11）**：从本教程原文提取 Dockerfile 和 YAML，只替换镜像地址和主题 ID，在 TKE（Kubernetes 1.36，x86_64 节点，`cbs` 云硬盘）上执行：
 
-- Job（第 2～7 节）：28 秒完成，日志里有模型回答和 `0 left`；CLS 中 1 条 Trace、8 个 Span，没有重复，也没有找不到父节点的 Span，入口类型为 `cli`。
-- Deployment（第 8 节）：用 `kubectl port-forward` 连到网页版并发起一个任务，CLS 中 1 条 Trace、8 个 Span，没有重复，入口类型为 `web`。
-- 清理（第 10 节）：PVC 删除后云硬盘也一并释放。
+- 镜像：按第 2 节构建，插件 0.1.1 的 SHA-256 校验通过。
+- Job：日志里有模型回答和 `0 left`；CLS 中 1 条 Trace、5 个 Span，没有重复，也没有找不到父节点的 Span，入口类型为 `cli`。
+- Deployment：通过 `kubectl port-forward` 在网页版发起任务；CLS 中 1 条 Trace、5 个 Span，入口类型为 `web`。
+- 第 9 节的结论在同一集群上单独实测。
 
-实测使用的是插件 0.1.0。0.1.1 的插件代码与 0.1.0 相同，只有版本号不同。
+TKE 上运行的镜像所带插件为 0.1.0，代码与 0.1.1 相同。
+
+**接入插件只需要四样东西：镜像里的插件文件和一个 patch、环境变量、密钥、一块盘。** 插件不要求改动 DSH 的任何其他设置，包括沙箱和权限。DSH 怎么执行工具，由你自己的 Agent 决定，和插件无关；如果你的 Agent 要在容器里执行命令，见[第 9 节](#9-如果你的-agent-要在容器里执行命令)。
 
 ---
 
@@ -27,8 +30,7 @@ K8s 需要交给 DSH 三样东西：
 ┌──────────────────────── 镜像（你自己构建一次）────────────────────────┐
 │  DSH 程序                                                              │
 │  插件文件  /opt/dsh-cls-observability/dsh-cls-observability.mjs        │
-│  patch 1   agentobs.patch.yml   告诉 DSH “启动时加载上面那个插件文件”  │
-│  patch 2   container.patch.yml  DSH 在容器里执行命令所需的设置         │
+│  patch     agentobs.patch.yml   告诉 DSH “启动时加载上面那个插件文件”  │
 │  包装脚本  entrypoint.sh         DSH 退出后把没发完的数据补发出去       │
 └────────────────────────────────────────────────────────────────────────┘
           ▲ 由镜像带进 Pod
@@ -43,11 +45,13 @@ K8s 需要交给 DSH 三样东西：
       CLS Trace 主题（控制台里查看）
 ```
 
+插件运行在 DSH 进程里：它读取 DSH 的运行事件，把待发送的数据写到 `/data/dsh` 下，再通过 HTTPS 发给 CLS。这些操作都不经过 DSH 给 Agent 工具准备的命令沙箱。
+
 本教程用到的几个概念：
 
 | 概念 | 一句话解释 | 在本教程里的作用 |
 |---|---|---|
-| 镜像 / Dockerfile | 打包好的运行环境；Dockerfile 是制作镜像的“配方” | 把 DSH、插件文件、两个 patch 文件、包装脚本装在一起 |
+| 镜像 / Dockerfile | 打包好的运行环境；Dockerfile 是制作镜像的“配方” | 把 DSH、插件文件、patch 文件、包装脚本装在一起 |
 | Pod | K8s 里实际运行的最小单位，里面跑一个或几个容器 | DSH 在 Pod 里运行 |
 | Job | 让 Pod 执行一次任务，结束后不再重启 | 第 6 节，跑一个一次性任务 |
 | Deployment | 让 Pod 一直运行，挂了会自动重建 | 第 8 节，长期运行的网页版 DSH |
@@ -65,10 +69,10 @@ K8s 需要交给 DSH 三样东西：
 | CLS **Trace 主题 ID** | CLS 控制台创建 Agent 可观测用的 Trace 主题，复制主题 ID | `CLS_AGENTOBS_TOPIC_ID` |
 | 主题所在**地域** | 例如 `ap-shanghai` | `CLS_AGENTOBS_REGION` |
 | 腾讯云 **SecretId / SecretKey** | 建议新建一个子账号，只授权该主题的 `cls:UploadLog` | Secret |
-| **DeepSeek API Key** | DeepSeek 开放平台 | Secret（DSH 调模型要用） |
+| **DeepSeek API Key** | DeepSeek 开放平台 | Secret（DSH 调模型要用，和插件无关） |
 | **镜像仓库** | 例如腾讯云容器镜像服务（TCR），记下仓库地址 | 推送镜像、K8s 拉取镜像 |
 | 本机 **Docker**（带 buildx） | Docker Desktop 或 OrbStack 等 | 构建镜像 |
-| 本机 **kubectl**，能连上 TKE 集群 | TKE 控制台下载 kubeconfig | 第 4～10 节 |
+| 本机 **kubectl**，能连上 TKE 集群 | TKE 控制台下载 kubeconfig | 第 4～11 节 |
 
 检查 kubectl 能连上集群：
 
@@ -82,7 +86,7 @@ kubectl get nodes
 
 ## 2. 构建镜像
 
-新建一个目录（比如 `dsh-image/`），在里面放 **3 个文件**。如果你已经有自己的 DSH 镜像，只需要把 2.3 里“插件”和“patch 文件”两段加进你的 Dockerfile（另见 [`examples/container/Dockerfile.snippet`](../examples/container/Dockerfile.snippet)）。
+新建一个目录（比如 `dsh-image/`），在里面放 **2 个文件**。如果你已经有自己的 DSH 镜像，只需要把 2.2 里“插件”和“patch 文件”两段加进你的 Dockerfile（另见 [`examples/container/Dockerfile.snippet`](../examples/container/Dockerfile.snippet)）。
 
 ### 2.1 `agentobs.patch.yml`：让 DSH 加载插件
 
@@ -92,24 +96,9 @@ kubectl get nodes
       name: /opt/dsh-cls-observability/dsh-cls-observability.mjs
 ```
 
-意思是：在 DSH 里插入一个叫 `cls-agentobs` 的插件，插件文件在 `name` 指定的路径。这个路径要和下面 Dockerfile 里放插件文件的位置一致。
+意思是：在 DSH 里插入一个叫 `cls-agentobs` 的插件，插件文件在 `name` 指定的路径。这个路径要和下面 Dockerfile 里放插件文件的位置一致。插件需要的 DSH 配置只有这一个文件。
 
-### 2.2 `container.patch.yml`：让 DSH 能在容器里执行命令
-
-```yaml
-- id: sandbox-policy
-  config:
-    mode: danger-full-access
-- id: permission
-  config:
-    defaultPreset: danger-full-access
-```
-
-这一步是 DSH 本身的需要，和插件无关。DSH 默认把 Agent 执行的命令放进沙箱，但容器里没有可用的沙箱后端；headless（无界面）模式下也没人点“批准”，结果所有命令都会被拒绝。在容器里，**容器本身就是隔离边界**，所以这里让 DSH 直接执行命令。
-
-> 这意味着 Agent 能在容器里执行任意命令。请只给容器必要的权限和网络访问，不要挂载敏感目录。
-
-### 2.3 `Dockerfile`：制作镜像的配方
+### 2.2 `Dockerfile`：制作镜像的配方
 
 ```dockerfile
 # syntax=docker/dockerfile:1
@@ -139,8 +128,8 @@ RUN mkdir -p /opt/dsh-cls-observability && cd /tmp \
  && rm -rf package ./*.tgz \
  && echo "${AGENTOBS_SHA256}  /opt/dsh-cls-observability/dsh-cls-observability.mjs" | sha256sum -c -
 
-# 两个 patch 文件：一个加载插件，一个是 DSH 在容器里运行命令需要的设置。
-COPY agentobs.patch.yml container.patch.yml /opt/dsh-cls-observability/
+# patch 文件：让 DSH 加载插件。
+COPY agentobs.patch.yml /opt/dsh-cls-observability/
 
 RUN mkdir -p /work && chown 1000:1000 /work
 WORKDIR /work
@@ -156,12 +145,12 @@ ENTRYPOINT ["/opt/dsh-cls-observability/entrypoint.sh"]
 | 第 1 段 | 用 npm 下载 DSH 0.2.2-rc.1 | DSH 本身就是一个 npm 包。`npm_config_cpu=x64` 表示下载 x86_64 版本，因为 TKE 节点一般是 x86_64；如果你的节点是 ARM，改成 `arm64`（同时把 `--platform` 改成 `linux/arm64`） |
 | 第 2 段开头 | 拷贝 DSH，`npm rebuild` 补全安装，把 `dsh` 命令加进 PATH | 之后在容器里直接敲 `dsh` 就能运行 |
 | 插件 | 下载插件 npm 包，取出插件文件和 `entrypoint.sh`，然后**校验 SHA-256** | 校验不通过时构建会失败，保证镜像里的插件文件和官方发布的一致。插件就这一个文件，没有其他依赖。换版本时，`AGENTOBS_VERSION` 和 `AGENTOBS_SHA256` 一起改，SHA-256 见 [GitHub Release](https://github.com/Tinker-LGD2026/dsh-cls-observability/releases) 里的 `.sha256` 文件 |
-| patch 文件 | 把 2.1、2.2 的两个文件拷进镜像 | 运行 DSH 时用 `--patch` 指向它们 |
+| patch 文件 | 把 2.1 的文件拷进镜像 | 运行 DSH 时用 `--patch` 指向它 |
 | ENTRYPOINT | 容器启动时先运行包装脚本，脚本再运行你传入的命令 | 容器的主进程一结束容器就被销毁。包装脚本等 DSH 退出后，把还没发出去的数据补发一次，再让容器结束 |
 
 **镜像里不放任何密钥**，密钥在运行时由 K8s Secret 传入。
 
-### 2.4 构建并推送
+### 2.3 构建并推送
 
 以腾讯云容器镜像服务个人版为例（把 `<命名空间>` 换成你自己的）：
 
@@ -232,8 +221,7 @@ docker run --rm --platform linux/amd64 \
   "$IMG" \
   dsh --profile headless \
       --patch /opt/dsh-cls-observability/agentobs.patch.yml \
-      --patch /opt/dsh-cls-observability/container.patch.yml \
-      'Use the bash tool to run `echo tutorial-ok`, then reply with its output only.'
+      'Reply with the single word: tutorial-ok'
 ```
 
 正常时，输出的最后是模型的回答 `tutorial-ok`，紧接着是包装脚本补发的日志：
@@ -317,7 +305,7 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000                 # 让 1000 号用户能写这块盘
-        fsGroupChangePolicy: OnRootMismatch   # DSH 本身需要，见第 9 节
+        fsGroupChangePolicy: OnRootMismatch   # DSH 本身需要，见第 10 节
       # imagePullSecrets: [{ name: dsh-image-pull }]   # 私有仓库时取消注释
       containers:
         - name: dsh
@@ -328,9 +316,7 @@ spec:
             - headless
             - --patch
             - /opt/dsh-cls-observability/agentobs.patch.yml
-            - --patch
-            - /opt/dsh-cls-observability/container.patch.yml
-            - "Use the bash tool to run `echo tutorial-ok`, then reply with its output only."
+            - "Reply with the single word: tutorial-ok"
           env:
             - { name: DSH_HOME, value: /data/dsh }                     # DSH 的数据目录 = 盘的挂载点
             - { name: CLS_AGENTOBS_ENABLED, value: "true" }            # 打开插件
@@ -360,6 +346,7 @@ kubectl logs -f job/dsh-task
 
 - **`CLS_AGENTOBS_NETWORK=internal`**：TKE 集群和 CLS 主题在同一地域时，走腾讯云内网，不经过公网。地域不同就删掉这一行。
 - **想先自检一下**：把 `args` 换成 `["node", "/opt/dsh-cls-observability/dsh-cls-observability.mjs", "--selftest"]`，看到 4 行 `ok` 后再换回来。
+- **换成你自己的任务**：改最后一个参数即可。任务要让 Agent 在容器里执行命令时，先看第 9 节。
 - **再跑一次**：Job 不能重复执行，要先删除再创建：`kubectl delete job dsh-task && kubectl apply -f job.yaml`。
 - **同时跑多个任务**：一块 `ReadWriteOnce` 盘同一时间只能给一个节点用，每个并发任务要有自己的 PVC。
 
@@ -369,20 +356,17 @@ kubectl logs -f job/dsh-task
 
 打开 Trace 主题的 Agent 可观测页面，按时间找到刚才的任务。如果设置了 `CLS_AGENTOBS_ENVIRONMENT=tutorial`，可以按环境筛选。
 
-上面这个示例任务，实测在 CLS 中共 8 个 Span：
+上面这个示例任务，实测在 CLS 中共 5 个 Span：
 
 ```
 enter_application                  一轮对话的入口：用户输入、最终答复
 └─ invoke_agent main               Agent
-   ├─ react round_1                第 1 步：模型决定调用 bash
-   │  ├─ chat deepseek-flash       模型调用：Token、首字耗时、输入输出
-   │  └─ execute_tool bash         工具调用：命令和输出
-   ├─ react round_2                第 2 步：模型根据结果作答
-   │  └─ chat deepseek-flash
-   └─ chat deepseek-flash          DSH 自己生成会话标题的后台调用（只在第一轮出现）
+   └─ react round_1                第 1 步
+      ├─ chat deepseek-flash       模型作答：Token、首字耗时、输入输出
+      └─ chat deepseek-flash       DSH 在后台生成会话标题（只在第一轮出现，和第 1 步同时进行，所以挂在它下面）
 ```
 
-Agent 名取自 DSH 的 profile：命令行（headless）显示为 `invoke_agent main`，网页版显示为 `invoke_agent standard`，两者的层级结构相同。
+Agent 调用工具时，每次调用会多一个 `execute_tool <工具名>` Span，挂在对应的步骤下，带入参、结果和耗时；工具失败时 Span 标为错误，并带上报错原文。Agent 名取自 DSH 的 profile：命令行（headless）显示为 `invoke_agent main`，网页版显示为 `invoke_agent standard`，层级结构相同。
 
 ---
 
@@ -445,7 +429,7 @@ spec:
       containers:
         - name: dsh
           image: <镜像地址>
-          args: ["dsh", "--profile", "web", "--patch", "/opt/dsh-cls-observability/container.patch.yml", "--no-open", "--port", "18080"]
+          args: ["dsh", "--profile", "web", "--no-open", "--port", "18080"]
           env: *agentobs-env
           envFrom: *agentobs-secret
           volumeMounts:
@@ -480,7 +464,60 @@ kubectl logs deploy/dsh-web -c dsh | grep 'dsh web:'
 
 ---
 
-## 9. 出问题时按这张表排查
+## 9. 如果你的 Agent 要在容器里执行命令
+
+**这一节讲的是 DSH 自身的行为，与插件无关：接不接插件都一样。** 只有一种情况需要看：你的 Agent 要在 DSH 所在的容器里**本地**执行命令，比如用 `bash` 工具。下面两种情况可以跳过：
+
+- Agent 不执行本地命令，比如纯对话，或者只调用 API 和 MCP 工具；
+- 首脑分离：工具在 e2b、腾讯云 Agent Runtime 等远程沙箱里执行。DSH 的本地沙箱只管 DSH 自己启动的子进程，管不到远程沙箱。
+
+### 9.1 会遇到什么
+
+DSH 默认会先把 Agent 要执行的命令放进一个沙箱，限制它只能写工作目录；在 Linux 上，这个沙箱靠 bwrap 或内核的 Landlock 实现。**两种都用不了时，DSH 拒绝执行命令，不会悄悄放开限制。** 这时工具会报下面的错误：
+
+```
+sandbox mode "workspace-write" is requested but no sandbox backend is usable on this host;
+refusing to run the command unconfined. ...
+```
+
+插件照常工作：这次工具调用在 CLS 中是一个标为错误的 `execute_tool bash` Span，结果字段里就是这段报错原文。
+
+### 9.2 你的环境能不能用沙箱
+
+能不能用，取决于节点的内核和容器运行时。实测结果（2026-11-11）：
+
+| 环境 | Landlock | bwrap | Agent 在容器里执行命令 |
+|---|---|---|---|
+| TKE 节点（TencentOS Server 4，内核 6.6，containerd） | 内核未启用 | 容器默认不允许创建命名空间 | 被拒绝，报 9.1 的错误 |
+| 本机 Docker（Ubuntu 内核 6.8） | 可用 | 镜像里没有安装 | 正常执行 |
+
+最简单的检查方法：把第 6 节 Job 的任务换成 ``Use the bash tool to run `echo ok`, then reply with its output only.``，跑一次，看日志里是 `ok` 还是上面的报错。
+
+### 9.3 在 TKE 上怎么办
+
+两种做法，按你的架构选：
+
+1. **把工具放到远程沙箱执行**（e2b、腾讯云 Agent Runtime 等）。DSH 的设置不用改，沙箱由远程环境提供。
+2. **把容器本身当作隔离边界，让 DSH 不再套第二层沙箱。** 新建 `container.patch.yml`：
+
+   ```yaml
+   - id: sandbox-policy
+     config:
+       mode: danger-full-access
+   - id: permission
+     config:
+       defaultPreset: danger-full-access
+   ```
+
+   这两项要一起设置：第一项让 DSH 直接执行命令；第二项让新会话默认使用同样的权限，否则 headless 模式下没人审批，命令仍会被拒绝。在 Dockerfile 里把它和 `agentobs.patch.yml` 一起拷进镜像（`COPY agentobs.patch.yml container.patch.yml /opt/dsh-cls-observability/`）。Job 在 `args` 里再加一个 `--patch /opt/dsh-cls-observability/container.patch.yml`，写在任务内容之前；Deployment 在 `dsh` 容器的 `args` 里加同样的 `--patch` 参数。
+
+   这样做之后，Agent 在容器里可以执行任意命令，也能读到容器里的环境变量，包括 CLS 密钥和 DeepSeek Key（插件上报 Trace 前会对这些密钥打码，但 Agent 本身能看到）。所以：CLS 子账号只给 `cls:UploadLog` 权限；容器只给必要的权限和网络访问；不要挂载敏感目录。
+
+**不要为了让沙箱可用而给容器加 `privileged`。** 这等于拆掉容器这层隔离，去换 DSH 内部的那一层，安全性反而更差。
+
+---
+
+## 10. 出问题时按这张表排查
 
 | 现象 | 原因 | 解决 |
 |---|---|---|
@@ -488,7 +525,7 @@ kubectl logs deploy/dsh-web -c dsh | grep 'dsh web:'
 | 想看插件到底在做什么 | — | 加环境变量 `CLS_AGENTOBS_DEBUG=true`，插件日志会输出到 stderr（`kubectl logs` 能看到） |
 | selftest 显示 `CLS_AGENTOBS_ENABLED is not true` | 没设置或拼错 | 值必须是字符串 `"true"`（YAML 里要加引号） |
 | selftest 显示 `credentials rejected` | 密钥错误或权限不足 | 检查 Secret 内容，以及子账号是否有该主题的 `cls:UploadLog` 权限 |
-| Agent 的命令全部被拒绝 | 容器里没有沙箱后端，headless 模式又没人审批 | 加上 `--patch .../container.patch.yml`（第 2.2 节） |
+| Agent 的命令被拒绝，报 `no sandbox backend is usable` | DSH 的命令沙箱在这个环境里用不了（DSH 自身的行为，与插件无关） | 见第 9 节 |
 | 第二次启动时 DSH 拒绝启动，提示凭证文件权限不对 | K8s 每次挂盘都会把文件改成组可读，DSH 拒绝使用权限过宽的凭证文件 | `securityContext` 里加 `fsGroupChangePolicy: OnRootMismatch` |
 | 新 Pod 一直卡在 `ContainerCreating` | 旧 Pod 还占着这块盘（`ReadWriteOnce`） | 先删除旧的 Job 或 Pod；Deployment 用 `strategy: Recreate` |
 | Pod 被强制杀掉后，部分数据没有立即出现 | 数据还留在盘上 | 下一个挂上这块盘的 Pod 会在大约 2 分钟内接管并补发，在任何节点上都可以 |
@@ -499,7 +536,7 @@ kubectl logs deploy/dsh-web -c dsh | grep 'dsh web:'
 
 ---
 
-## 10. 清理
+## 11. 清理
 
 ```bash
 kubectl delete job dsh-task --ignore-not-found
@@ -515,8 +552,7 @@ kubectl delete secret dsh-agentobs
 ```
 dsh-image/
 ├── Dockerfile               第 2 节
-├── agentobs.patch.yml       第 2 节：加载插件
-└── container.patch.yml      第 2 节：容器里执行命令
+└── agentobs.patch.yml       第 2 节：加载插件
 pvc.yaml                     第 5 节
 job.yaml                     第 6 节
 deployment.yaml              第 8 节（进阶）
